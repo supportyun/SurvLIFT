@@ -325,7 +325,7 @@ class LlamaFinetuner:
             # ... (학습 Loop 코드는 그대로 유지) ...
             
             val_loss = self.validate(val_loader)
-            self.train_loss_list.append(np.mean(train_loss))
+            self.train_loss_list.append(np.mean(train_loss0))
             self.val_loss_list.append(val_loss)
             print(f"Epoch {epoch+1}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}")
 
