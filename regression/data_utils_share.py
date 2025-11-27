@@ -95,22 +95,39 @@ def data2text_cp2(row, label=True, init='', end=''):
         'was already off study by' if status == '?' else
         'had already died by'
     )
+    # prompt += (
+    #     f"The patient with id {int(row['id']):d} was enrolled in the primary biliary cholangitis (PBC) study. At the enrollment period, "
+    #     f"the patient was {row['age']} years old, and {'was treated with D-penicillamine' if row['trt'] == 1 else 'received no active treatment (placebo)'}. "
+    #     f"Note that this patient {phrase} year {row['time']}. "
+    #     f"Based on these observed values, what is the instantaneous hazard for this patient at time {row['time']} years? "
+    #     f"By 'instantaneous hazard' we mean the event rate at time t, conditional on having survived up to t. "
+    #     f"Output only one non-negative real number with exactly 4 decimals. No extra text."
+    # )
     prompt += (
-        f"The patient with id {int(row['id']):d} was enrolled in the primary biliary cholangitis (PBC) study. At the enrollment period, "
-        f"the patient was {row['age']} years old, and {'was treated with D-penicillamine' if row['trt'] == 1 else 'received no active treatment (placebo)'}. "
-        f"Note that this patient {phrase} year {row['time']}. "
-        f"Based on these observed values, what is the instantaneous hazard for this patient at time {row['time']} years? "
-        f"By 'instantaneous hazard' we mean the event rate at time t, conditional on having survived up to t. "
-        f"Output only one non-negative real number with exactly 4 decimals. No extra text."
+        f"The patient with id {int(row['id']):d} was enrolled in the PBC study. "
+        f"At enrollment, the patient was {row['age']} years old, and "
+        f"{'was treated with D-penicillamine' if row['trt'] == 1 else 'received placebo'}. "
+        # [중요] 질문을 '생존 시간 예측'으로 변경
+        f"Based on these features, predict the expected survival time (T) for this patient. "
+        f"Output only one non-negative real number. No extra text."
     )
+
     prompt += end
 
     if not label:
         final_prompt = f"{prompt}###"
+    # else:
+    #     completion = row['hazard']
+    #     final_prompt = "{\"prompt\":\"%s###\", \"completion\":\"%s@@@\"}" % (prompt, completion)
+    # return final_prompt
+    
     else:
-        completion = row['hazard']
+        # [중요] 정답을 hazard가 아닌 'target_time'으로 변경
+        # (make_target.py로 만든 파일에 이 컬럼이 있어야 함)
+        completion = f"{row['target_time']:.4f}" 
         final_prompt = "{\"prompt\":\"%s###\", \"completion\":\"%s@@@\"}" % (prompt, completion)
     return final_prompt
+
 
 def write_jsonl(jsonl, filename):
     os.makedirs(os.path.dirname(filename), exist_ok=True)

@@ -15,9 +15,9 @@ from lifelines.utils import concordance_index
 from transformers import set_seed
 
 
-def prepare_data():
-    df = pd.read_csv("/home/kanggi1/survlift/LIFT/survlift/data/synthetic_pbc_data_N300_given_2_covariate_seed1.csv")
-    
+def prepare_data(data_seed):
+    # 현재 실행 파일(regression 폴더) 기준, 상위 폴더의 data 폴더를 찾도록 수정
+    df = pd.read_csv(f"../data/target_data_for_aft_seed{data_seed}.csv")
     event_data = df[df['status'] == 1]
     censor_data = df[df['status'] == 0]
 
@@ -37,7 +37,7 @@ def prepare_data():
 def main(args):
     print("Prepare data...")
     set_seed(args.seed)
-    train, validate, test = prepare_data()
+    train, validate, test = prepare_data(args.data_seed)
     
     unique_validate = validate[["id", "time", "status"]]
     unique_validate[['time']] = unique_validate[['time']].round(2)
@@ -69,8 +69,14 @@ def main(args):
 
 
     print("Save data...")
-    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"results/250923/data1/seed_{args.seed}")
+    # [수정 후] data_seed에 따라 폴더가 바뀜 (예: data1, data2, ...)
+    base_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 
+        f"results/250923/data{args.data_seed}/seed_{args.seed}"
+    )    
     os.makedirs(base_dir, exist_ok=True)
+    output_dir = os.path.join(base_dir, f"epochs_{args.epochs}_lr_{args.lr}")
+    os.makedirs(output_dir, exist_ok=True)
     output_dir = os.path.join(base_dir, f"epochs_{args.epochs}_lr_{args.lr}")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -248,7 +254,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
+    # [추가] 데이터 파일 번호를 지정하는 인자 추가
+    parser.add_argument("--data_seed", type=int, default=1, help="Data file seed (1-10)")
+    parser.add_argument("--saving_checkpoint", type=bool, default=True)
+    #####[추가]
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--system_message", type=str, default="You are a helpful and knowledgeable assistant. Answer as concisely as possible.")

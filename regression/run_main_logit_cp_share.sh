@@ -1,7 +1,7 @@
 #!/bin/bash
 # run_main.sh
 
-python LIFT/survlift/regression/hazard_prediction/main_logit_cp_share.py \
+  python main_logit_cp_share.py \
   --model_name "meta-llama/Llama-3.2-1B" \
   --device "cuda:0" \
   --load_in_4bit True \
