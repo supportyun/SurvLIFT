@@ -1,0 +1,27 @@
+name: survlift_final
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # 파이썬 3.10이 딥러닝 호환성이 가장 좋습니다
+  - python=3.10
+  - pip
+  # 핵심 데이터 분석 및 ML 라이브러리
+  - pandas
+  - matplotlib
+  - scipy
+  - scikit-learn
+  - lifelines
+  - ipykernel
+  # Pip으로 설치할 라이브러리들
+  - pip:
+    - tqdm
+    - transformers
+    - accelerate
+    - peft
+    - bitsandbytes
+    - safetensors
+    - huggingface-hub
+    - triton
+    - typing-extensions
+    # PyTorch는 설치 오류 방지를 위해 터미널에서 따로 설치합니다
