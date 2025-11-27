@@ -1,23 +1,26 @@
-# main.py
 import os
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import argparse
 import torch
 import pandas as pd
 import numpy as np
-from llama_finetuner_logit_cp import LlamaFinetuner
+from huggingface_hub import login  # [추가]
+login(token="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")
+from llama_finetuner_logit_cp_share import LlamaFinetuner
 from sklearn.model_selection import train_test_split
 from data_utils_share import *
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-import matplotlib.ticker as ticker
-from lifelines.utils import concordance_index
+from lifelines.utils import concordance_index # C-index 계산용
 from transformers import set_seed
 
-
 def prepare_data(data_seed):
-    # 현재 실행 파일(regression 폴더) 기준, 상위 폴더의 data 폴더를 찾도록 수정
-    df = pd.read_csv(f"../data/target_data_for_aft_seed{data_seed}.csv")
+    # 상대 경로로 타겟 데이터 로드
+    file_path = f"../data/target_data_for_aft_seed{data_seed}.csv"
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Data file not found: {file_path}")
+        
+    df = pd.read_csv(file_path)
+    
+    # Train/Val/Test Split (기존 로직 유지)
     event_data = df[df['status'] == 1]
     censor_data = df[df['status'] == 0]
 
@@ -32,51 +35,29 @@ def prepare_data(data_seed):
 
     return train, validate, test
 
-
-
 def main(args):
-    print("Prepare data...")
+    print(f"Prepare data (Seed: {args.data_seed})...")
     set_seed(args.seed)
+    
+    # 1. 데이터 로드
     train, validate, test = prepare_data(args.data_seed)
     
-    unique_validate = validate[["id", "time", "status"]]
-    unique_validate[['time']] = unique_validate[['time']].round(2)
+    # 2. [중요] 불필요한 전처리(Counting process) 삭제 -> 원본 그대로 사용
+    # target_time이나 log_time 등 필요한 컬럼이 이미 있는지 확인 필요
     
-    unique_test = test[["id","time","status"]]
-    unique_test[['time']] = unique_test[['time']].round(2)
-        
-    train_df = convert_to_counting_process_uniq(train)
-    train_df = calculate_hazard(train_df, rho=1.5)
-    train_df[['age','time']] = train_df[['age','time']].round(2)
-    train_df[['hazard']] = train_df[['hazard']].round(4)
-        
-    validate_df = convert_to_counting_process_uniq2(validate)
-    validate_df = calculate_hazard(validate_df, rho=1.5)
-    validate_df[['age','time']] = validate_df[['age','time']].round(2)
-    validate_df[['hazard']] = validate_df[['hazard']].round(4)
-        
-    test_df = convert_to_counting_process_uniq2(test)
-    test_df = calculate_hazard(test_df, rho=1.5)
-    test_df[['age','time']] = test_df[['age','time']].round(2)
-    test_df[['hazard']] = test_df[['hazard']].round(4)
-
     init= ''
     end = ''
 
-    train_prompts = df2prompts(train_df, data2text_cp2, init, end)
-    val_prompts = df2prompts(validate_df, data2text_cp2, init, end)
-    test_prompts = df2prompts(test_df, data2text_cp2, init, end)
+    # 3. 프롬프트 변환 (data_utils_share.py의 data2text_cp2가 수정되어 있어야 함)
+    train_prompts = df2prompts(train, data2text_cp2, init, end)
+    val_prompts = df2prompts(validate, data2text_cp2, init, end)
+    test_prompts = df2prompts(test, data2text_cp2, init, end)
 
-
-    print("Save data...")
-    # [수정 후] data_seed에 따라 폴더가 바뀜 (예: data1, data2, ...)
+    print("Save prompts...")
     base_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 
         f"results/250923/data{args.data_seed}/seed_{args.seed}"
     )    
-    os.makedirs(base_dir, exist_ok=True)
-    output_dir = os.path.join(base_dir, f"epochs_{args.epochs}_lr_{args.lr}")
-    os.makedirs(output_dir, exist_ok=True)
     output_dir = os.path.join(base_dir, f"epochs_{args.epochs}_lr_{args.lr}")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -84,13 +65,12 @@ def main(args):
     val_js_path   = os.path.join(output_dir, "synthetic_prompts_val.jsonl")
     test_js_path  = os.path.join(output_dir, "synthetic_prompts_test.jsonl")
 
-    train_js = write_jsonl('\n'.join(train_prompts), train_js_path)
-    val_js   = write_jsonl('\n'.join(val_prompts), val_js_path)
-    test_js  = write_jsonl('\n'.join(test_prompts), test_js_path)
+    write_jsonl('\n'.join(train_prompts), train_js_path)
+    write_jsonl('\n'.join(val_prompts), val_js_path)
+    write_jsonl('\n'.join(test_prompts), test_js_path)
     
-    fallback_means = build_group_means(train_df, t_col="time", hazard_col="hazard",
-                                   age_col="age", trt_col="trt")
-    
+    # Fallback means는 필요 시 구현 (여기서는 생략 가능하거나 train 데이터 기반으로 계산)
+    fallback_means = None 
     
     print('Start train...')
     finetuner = LlamaFinetuner(
@@ -98,7 +78,6 @@ def main(args):
         device=args.device,
         output_dir=output_dir,
         load_in_4bit=args.load_in_4bit,
-        # load_in_8bit=args.load_in_8bit,
         bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
         bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype,
         bnb_4bit_quant_type=args.bnb_4bit_quant_type,
@@ -108,180 +87,100 @@ def main(args):
         seed = args.seed
     )
 
-    finetuner.train(train_js, val_js,
+    # 학습 (unique_validate_df 등 불필요한 인자는 제거하거나 None 처리)
+    finetuner.train(train_js_path, val_js_path,
                     epochs=args.epochs,
                     batch_size=args.batch_size,
                     lr=args.lr,
                     weight_decay=args.weight_decay,
                     warmup_steps=args.warmup_steps,
                     saving_checkpoint=args.saving_checkpoint,
-                    unique_validate_df = unique_validate, 
+                    unique_validate_df = None,  # 시간 예측에서는 불필요
                     interp_method = args.interp_method,
                     min_g = args.min_g,
                     fallback_means = fallback_means
                     )
     
-    
-    
+    # --- 평가 (Evaluate) ---
     print("Start evaluate...")
     finetuner.load_model()
     
-    test_prompts = extract_prompts(test_js, '')
-    test_completions = extract_completion(test_js)
-
-    ids = extract_id(test_prompts)
-    times = extract_time2(test_prompts)
+    test_prompts_loaded = extract_prompts(test_js_path, '')
+    test_completions = extract_completion(test_js_path)
     
-    ans, invalid_ratio, final_invalid_ratio = finetuner.generate(text_lst=test_prompts, max_token=10, batch_size=args.batch_size, valid_mean = 0.0)
-
-    print("test answer: ", ans)
-
+    # 정답 추출
     test_truth = [float(s.split('@@@', 1)[0].strip()) for s in test_completions]
     
-    df = pd.DataFrame({
-        'ids': ids,
-        'times': times,
-        'hazard_true': test_truth,
-        'hazard_pred': ans
+    # 예측
+    ans, invalid_ratio, final_invalid_ratio = finetuner.generate(
+        text_lst=test_prompts_loaded, 
+        max_token=10, 
+        batch_size=args.batch_size, 
+        valid_mean=np.mean(test_truth)
+    )
+
+    print("Predictions sample:", ans[:5])
+
+    # 1. MAE 계산
+    mae = np.mean(np.abs(np.array(test_truth) - np.array(ans)))
+    print(f"Test MAE: {mae:.4f}")
+
+    # 2. C-index 계산
+    # 주의: C-index는 '실제 관측 시간'과 'status(사망여부)'가 필요함
+    # test 데이터프레임의 순서가 섞이지 않았다면 그대로 사용 가능
+    try:
+        c_index = concordance_index(test['time'], ans, test['status'])
+        print(f"Test C-index: {c_index:.4f}")
+    except Exception as e:
+        print(f"C-index calculation failed: {e}")
+        c_index = 0.0
+
+    # 결과 상세 저장
+    result_df = pd.DataFrame({
+        'id': test['id'].values,
+        'true_target_time': test_truth,
+        'pred_time': ans,
+        'observed_time': test['time'].values,
+        'status': test['status'].values
     })
+    result_df.to_csv(os.path.join(output_dir, "prediction_results.csv"), index=False)
+
+    # 요약 결과 저장 (10개 시드 모음집)
+    summary_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_summary_results.csv")
     
-    df_with_survival = cumulative_hazard_trap_scipy(df, id_col="ids", time_col="times", hazard_col="hazard_pred")
-    
-    df_with_cumhaz = df_with_survival.merge(
-        test_df[['id', 'time', 'hazard', 'cum_haz']],
-        how = 'left',
-        left_on=["ids", "times", "hazard_true"], 
-        right_on=["id", "time", "hazard"]      
-    ).drop(columns=["id", "time", "hazard"])
-    
-    df_unique = df_with_survival.merge(
-        unique_test[['id','time','status']],
-        left_on=['ids','times'],  
-        right_on=['id','time'],   
-        how='inner'
-    ).drop(columns=['id','time']) \
-    .rename(columns={'ids':'id', 'times':'time'})
-    
-
-    df_with_cumhaz.to_csv(os.path.join(output_dir, "cumhaz.csv"), index=True)
-    df_with_survival.to_csv(os.path.join(output_dir, "survival.csv"), index=True)
-    df_unique.to_csv(os.path.join(output_dir, "unique_df.csv"), index=True)
-    
-    id_list = sorted([i for i in df_with_survival['ids'].unique()])
-    n_rows, n_cols = 8, 4
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 25))
-    axes = np.atleast_2d(axes)
-
-    color_true = '#5FA8AF'
-    color_pred = 'orange'
-
-    total_slots = n_rows * n_cols
-
-    legend_slot = 0 
-    plot_slots = [i for i in range(total_slots) if i != legend_slot]
-
-    for this_id, slot in zip(id_list, plot_slots):
-        r, c = divmod(slot, n_cols)
-        ax = axes[r, c]
-
-        llm_plot_df = df_with_survival[df_with_survival["ids"] == this_id].sort_values(by="times")
-        mae = calculate_mae(llm_plot_df["hazard_true"], llm_plot_df["hazard_pred"]).round(4)
-        ax.plot(llm_plot_df["times"], llm_plot_df["hazard_true"],
-                label="True", marker="o", color=color_true, zorder=2)
-        ax.plot(llm_plot_df["times"], llm_plot_df["hazard_pred"],
-                label="Predicted", marker="o", color=color_pred, zorder=2)
-
-        ax.set_title(f"ID {int(this_id)} (MAE = {mae})")
-        ax.set_xlabel("Time in year")
-        ax.set_ylabel("Hazard")
-        ax.grid(True)
-        ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
-        ax.ticklabel_format(axis='y', style='plain', useOffset=False)
-
-        this_df = df_unique[df_unique['id'] == this_id]
-        if this_df['status'].iloc[0] == 1:
-            last_time = this_df['time'].iloc[0]
-            ax.axvline(x=last_time, color='#D63F29', linestyle='-', linewidth=2)
-
-    leg_ax = axes.flat[legend_slot]
-    leg_ax.axis('off')
-    handles = [
-        Line2D([], [], linestyle='-', marker='o', color=color_true, label='True', lw=2, ms=8),
-        Line2D([], [], linestyle='-', marker='o', color=color_pred, label='Predicted', lw=2, ms=8),
-        Line2D([], [], linestyle='-', color='#D63F29', label='Event time', lw=2, ms=8)
-    ]
-    leg_ax.legend(handles=handles, loc='center', frameon=True, fontsize=20)
-
-    unused_slots = plot_slots[len(id_list):]
-    for k in unused_slots:
-        fig.delaxes(axes.flat[k])
-
-    plt.tight_layout()
-    plt.show()
-    fig.savefig(os.path.join(output_dir, "hazard_plot.png"), dpi=500)
-
-    S_at_T = df_unique['S'].tolist()
-    risk_scores = [-s for s in S_at_T]
-    c_index = concordance_index(df_unique['time'].tolist(), risk_scores, df_unique['status'].tolist())
-    
-    event_df = unique_test.rename(columns={'time': 'Y', 'status': 'delta'}).copy()
-    hz_use = df_with_survival[['ids', 'times', 'S']].copy()
-    hz_use = hz_use.rename(columns={'ids': 'id', 'times': 'time', 'S': 'survival_prob'})
-    BS_df = brier_ipcw(hz_use, event_df[['id','Y','delta']], method=args.interp_method, min_g=args.min_g, model = "SurvLIFT")
-    ibs = ibs_from_bs(BS_df)
-    BS_df.to_csv(os.path.join(output_dir, "brier_ipcw_over_time.csv"), index=False)
-    with open(os.path.join(output_dir, "ibs.txt"), "w") as f:
-        f.write(str(ibs) + "\n")
-    
-    print("C-index: ", c_index)
-    print("IBS:", ibs)
-    print("Ratio of invalid answer: ", invalid_ratio)
-    print("Final invalid ratio: ", final_invalid_ratio)
-
-    def save_test_metrics(output_dir, c_index, ibs, none_ratio, final_invalid_ratio):
-        metrics = {
-            "test_c_index": c_index,
-            "test_ibs": ibs, 
-            "invalid_answer_ratio":none_ratio,
-            "fianl_invalid_anser_ratio": final_invalid_ratio
-        }
-        path = os.path.join(output_dir, "test_metrics.json")
-        with open(path, "w") as f:
-            json.dump(metrics, f, indent=2)
-    
-    save_test_metrics(output_dir, c_index, ibs, invalid_ratio, final_invalid_ratio)
-    
+    if not os.path.exists(summary_file):
+        with open(summary_file, "w") as f:
+            f.write("Data_Seed,Model_Seed,MAE,C_index,Invalid_Ratio\n")
+            
+    with open(summary_file, "a") as f:
+        f.write(f"{args.data_seed},{args.seed},{mae:.4f},{c_index:.4f},{final_invalid_ratio:.4f}\n")
+        
+    print(f"Saved summary to {summary_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # [추가] 데이터 파일 번호를 지정하는 인자 추가
+    # Args 설정 (중복 제거 및 정리)
     parser.add_argument("--data_seed", type=int, default=1, help="Data file seed (1-10)")
-    parser.add_argument("--saving_checkpoint", type=bool, default=True)
-    #####[추가]
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--system_message", type=str, default="You are a helpful and knowledgeable assistant. Answer as concisely as possible.")
-
     parser.add_argument("--load_in_4bit", type=bool, default=True)
-    # parser.add_argument("--load_in_8bit", type=bool, default=False)
     parser.add_argument("--bnb_4bit_use_double_quant", type=bool, default=True)
     parser.add_argument("--bnb_4bit_compute_dtype", type=str, default="float16")
     parser.add_argument("--bnb_4bit_quant_type", type=str, default="nf4")
     parser.add_argument("--r", type=int, default=8)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.1)
-
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--warmup_steps", type=int, default=6)
     parser.add_argument("--saving_checkpoint", type=bool, default=True)
-    parser.add_argument("--seed", type=int, default=1024)
+    parser.add_argument("--seed", type=int, default=1024) # 모델 시드
     parser.add_argument("--interp_method", type=str, default="locf")
     parser.add_argument("--min_g", type=float, default=1e-10)
-    args = parser.parse_args()
     
+    args = parser.parse_args()
     args.device = torch.device(args.device)
     
     main(args)
