@@ -129,11 +129,11 @@ def main(args):
     # 주의: C-index는 '실제 관측 시간'과 'status(사망여부)'가 필요함
     # test 데이터프레임의 순서가 섞이지 않았다면 그대로 사용 가능
     try:
-        c_index = concordance_index(test['time'], ans, test['status'])
+        c_index = concordance_index(test['time'], -ans, test['status'])
         print(f"Test C-index: {c_index:.4f}")
     except Exception as e:
         print(f"C-index calculation failed: {e}")
-        c_index = 0.0
+        c_index = 0.5 ######################
 
     # 결과 상세 저장
     result_df = pd.DataFrame({
