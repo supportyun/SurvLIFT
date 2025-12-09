@@ -85,7 +85,8 @@ def process_seed(seed):
     # 7. 결과 저장
     # 모델 학습용 (로그 스케일 & 원래 시간 스케일)
     df['target_log_time'] = new_targets_log
-    df['target_time'] = np.round(np.exp(new_targets_log), 2)
+    df['target_time'] = np.round(np.exp(new_targets_log), 2) ## 소수 둘째자리까지 표현
+    df['age'] = np.round(df['age'], 2)## 소수 둘째자리까지 표현
     # 필요한 컬럼만 저장 (원본 컬럼 + 타겟)
     cols_to_save = ['id', 'trt', 'age', 'time', 'status', 'target_time', 'target_log_time']
     df[cols_to_save].to_csv(output_path, index=False)

@@ -9,7 +9,6 @@ login(token="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")
 from llama_finetuner_logit_cp_share import LlamaFinetuner
 from sklearn.model_selection import train_test_split
 from data_utils_share import *
-from lifelines.utils import concordance_index # C-index 계산용
 from transformers import set_seed
 
 def prepare_data(data_seed):
@@ -28,13 +27,15 @@ def prepare_data(data_seed):
     event_validate, event_test = train_test_split(event_temp, test_size=0.5, random_state=42)
     censor_train, censor_temp = train_test_split(censor_data, test_size=0.2, random_state=42)
     censor_validate, censor_test = train_test_split(censor_temp, test_size=0.5, random_state=42)
-
+    # frac = 1.0 전체 데이터를 뽑는 것이므로 순서만 바뀜, random_stat은 seed랑 같음
     train = pd.concat([event_train, censor_train]).sample(frac=1, random_state=42)
     validate = pd.concat([event_validate, censor_validate]).sample(frac=1, random_state=42)
     test = pd.concat([event_test, censor_test]).sample(frac=1, random_state=42)
 
     return train, validate, test
 
+### 프롬프트 변환, 변환후 jsonl 파일로 저장
+# args 는 터미널에 입력한 값들을 객체 형태로 저장, 실험 설정값들의 모음집이라고 보면 됨.
 def main(args):
     print(f"Prepare data (Seed: {args.data_seed})...")
     set_seed(args.seed)
@@ -42,7 +43,7 @@ def main(args):
     # 1. 데이터 로드
     train, validate, test = prepare_data(args.data_seed)
     
-    # 2. [중요] 불필요한 전처리(Counting process) 삭제 -> 원본 그대로 사용
+    # 2. [중요] 불필요한 전처리(Counting process) 삭제 
     # target_time이나 log_time 등 필요한 컬럼이 이미 있는지 확인 필요
     
     init= ''
@@ -68,7 +69,8 @@ def main(args):
     write_jsonl('\n'.join(train_prompts), train_js_path)
     write_jsonl('\n'.join(val_prompts), val_js_path)
     write_jsonl('\n'.join(test_prompts), test_js_path)
-    
+    #fallback_means 처리 (None)
+    # 원본: build_group_means(...) 함수로 그룹별 평균 Hazard를 미리 계산해 뒀습니다. (모델이 답을 못 낼 경우 대타로 쓰기 위해)
     # Fallback means는 필요 시 구현 (여기서는 생략 가능하거나 train 데이터 기반으로 계산)
     fallback_means = None 
     
@@ -121,21 +123,14 @@ def main(args):
 
     print("Predictions sample:", ans[:5])
 
-    # 1. MAE 계산
-    mae = np.mean(np.abs(np.array(test_truth) - np.array(ans)))
-    print(f"Test MAE: {mae:.4f}")
+    # [수정 1] MAE, C-index 삭제하고 RMSE 계산으로 변경
+    # RMSE = sqrt(mean((True - Pred)^2))
+    mse = np.mean((np.array(test_truth) - np.array(ans))**2)
+    rmse = np.sqrt(mse)
+    
+    print(f"Test RMSE: {rmse:.4f}")
 
-    # 2. C-index 계산
-    # 주의: C-index는 '실제 관측 시간'과 'status(사망여부)'가 필요함
-    # test 데이터프레임의 순서가 섞이지 않았다면 그대로 사용 가능
-    try:
-        c_index = concordance_index(test['time'], -ans, test['status'])
-        print(f"Test C-index: {c_index:.4f}")
-    except Exception as e:
-        print(f"C-index calculation failed: {e}")
-        c_index = 0.5 ######################
-
-    # 결과 상세 저장
+    # [수정 2] 결과 상세 저장 (C-index 관련 내용 제거)
     result_df = pd.DataFrame({
         'id': test['id'].values,
         'true_target_time': test_truth,
@@ -145,17 +140,33 @@ def main(args):
     })
     result_df.to_csv(os.path.join(output_dir, "prediction_results.csv"), index=False)
 
-    # 요약 결과 저장 (10개 시드 모음집)
+    # [수정 3] 요약 결과 저장 (CSV 헤더 및 내용 변경)
     summary_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_summary_results.csv")
     
     if not os.path.exists(summary_file):
         with open(summary_file, "w") as f:
-            f.write("Data_Seed,Model_Seed,MAE,C_index,Invalid_Ratio\n")
+            # 헤더에서 MAE, C_index 제거하고 RMSE 추가
+            f.write("Data_Seed,Model_Seed,RMSE,Invalid_Ratio\n")
             
     with open(summary_file, "a") as f:
-        f.write(f"{args.data_seed},{args.seed},{mae:.4f},{c_index:.4f},{final_invalid_ratio:.4f}\n")
+        # 내용도 RMSE로 변경
+        f.write(f"{args.data_seed},{args.seed},{rmse:.4f},{final_invalid_ratio:.4f}\n")
         
     print(f"Saved summary to {summary_file}")
+
+    # [수정] 굳이 함수 만들지 않고 바로 딕셔너리 만들어서 저장
+    metrics = {
+        "test_rmse": rmse,
+        "invalid_answer_ratio": invalid_ratio,
+        "final_invalid_answer_ratio": final_invalid_ratio
+    }
+    
+    # test_metrics.json 파일로 저장
+    json_path = os.path.join(output_dir, "test_metrics.json")
+    with open(json_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    print("All evaluation finished!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

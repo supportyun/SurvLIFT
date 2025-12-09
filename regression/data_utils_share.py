@@ -105,7 +105,7 @@ def data2text_cp2(row, label=True, init='', end=''):
     # )
     prompt += (
         f"The patient with id {int(row['id']):d} was enrolled in the PBC study. "
-        f"At enrollment, the patient was {row['age']} years old, and "
+        f"At enrollment, the patient was {row['age']:.2f} years old, and "
         f"{'was treated with D-penicillamine' if row['trt'] == 1 else 'received placebo'}. "
         # [중요] 질문을 '생존 시간 예측'으로 변경
         f"Based on these features, predict the expected survival time (T) for this patient. "
