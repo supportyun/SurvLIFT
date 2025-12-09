@@ -124,7 +124,7 @@ def data2text_cp2(row, label=True, init='', end=''):
     else:
         # [중요] 정답을 hazard가 아닌 'target_time'으로 변경
         # (make_target.py로 만든 파일에 이 컬럼이 있어야 함)
-        completion = f"{row['target_time']:.4f}" 
+        completion = f"{row['target_time']:.2f}" 
         final_prompt = "{\"prompt\":\"%s###\", \"completion\":\"%s@@@\"}" % (prompt, completion)
     return final_prompt
 
