@@ -141,21 +141,25 @@ def bin_age(age: float) -> str:
     if 60 <= age < 80: return "60-79"
     return "out"
 
-def build_group_means(train_df: pd.DataFrame,
-                      t_col="time", hazard_col="hazard",
-                      age_col="age", trt_col="trt"):
-    
+def build_time_group_means(train_df, target_col="target_time", age_col="age", trt_col="trt"):
     df = train_df.copy()
-    df["age_bin"] = df[age_col].apply(bin_age)
+    df["age_bin"] = df[age_col].apply(bin_age) # bin_age 함수는 기존 그대로 사용
 
-    by_full = (df.groupby(["age_bin", trt_col, t_col])[hazard_col]
-                 .mean().reset_index())
-    by_full = { (r["age_bin"], int(r[trt_col]), r[t_col]): float(r[hazard_col])
-                for _, r in by_full.iterrows() }
-
-    return {
-        "by_full": by_full
+    # [수정] 나이와 치료법별로 '생존 시간(Target)'의 평균을 구함
+    by_full = df.groupby(["age_bin", trt_col])[target_col].mean().reset_index()
+    
+    # [수정된 코드 위치]
+    means_dict = {
+        # [수정] 그룹 평균 반올림
+        (r["age_bin"], int(r[trt_col])): round(float(r[target_col]), 2)
+        for _, r in by_full.iterrows()
     }
+    
+    # [수정] 전체 평균(Global Mean) 반올림
+    means_dict["global_mean"] = round(df[target_col].mean(), 2)
+    
+    return means_dict
+
 
 
 def extract_prompts(jsonl_file, in_context_prefix=''):
@@ -339,50 +343,33 @@ def parse_number_4dec(text: str,
     return val
 
 def extract_variable(prompts):
-    AGE_RE   = re.compile(r'\b(\d+(?:\.\d+)?)\s*years?\s*old\b', re.IGNORECASE)
-    TIME_RE  = re.compile(r'\bat\s*time\s*(\d+(?:\.\d+)?)\s*years?\b', re.IGNORECASE)
+    # 정규식은 기존과 동일
+    AGE_RE = re.compile(r'\b(\d+(?:\.\d+)?)\s*years?\s*old\b', re.IGNORECASE)
+    TRT1_RE = re.compile(r'\bD[\-\u2010-\u2015]?penicillamine\b', re.IGNORECASE)
+    TRT2_RE = re.compile(r'\bplacebo\b', re.IGNORECASE)
     
-    TRT1_RE  = re.compile(r'\bD[\-\u2010-\u2015]?penicillamine\b', re.IGNORECASE)
-    TRT2_RE  = re.compile(r'\bplacebo\b', re.IGNORECASE)
-    
-    ages, trts, times = [], [], []
+    ages, trts = [], []
     for p in prompts:
         m_age = AGE_RE.search(p)
         ages.append(float(m_age.group(1)) if m_age else None)
 
-        if TRT1_RE.search(p):
-            trt_val = 1
-        elif TRT2_RE.search(p):
-            trt_val = 2
-        else:
-            trt_val = None  
+        if TRT1_RE.search(p): trt_val = 1
+        elif TRT2_RE.search(p): trt_val = 2
+        else: trt_val = None
         trts.append(trt_val)
+        
+    return {"age": ages, "trt": trts}
 
-        m_time = TIME_RE.search(p)
-        times.append(float(m_time.group(1)) if m_time else None)
-
-    return {"age": ages, "trt": trts, "t": times}
-
-def fallback_lookup_from_means(age, trt, t_key, means, clip_min=None, clip_max=None):
+def lookup_time_from_groups(age, trt, means_dict):
     age_bin = bin_age(age)
+    if trt is None: return means_dict.get("global_mean")
     trt = int(trt)
 
-    val = None
-    by_full = means.get("by_full", {})
-
-    if t_key is not None:
-        val = by_full.get((age_bin, trt, t_key))
-
-    if val is None and t_key is not None:
-        candidates = [k[2] for k in by_full.keys()
-                      if k[0] == age_bin and k[1] == trt and k[2] < t_key]
-        if candidates:
-            best_t = max(candidates)
-            val = by_full.get((age_bin, trt, best_t))
-
-    if clip_min is not None and val < clip_min:
-        val = clip_min
-    if clip_max is not None and val > clip_max:
-        val = clip_max
-
+    # 1. 그룹 평균 찾기
+    val = means_dict.get((age_bin, trt))
+    
+    # 2. 없으면 전체 평균 사용
+    if val is None:
+        val = means_dict.get("global_mean")
+        
     return float(val)

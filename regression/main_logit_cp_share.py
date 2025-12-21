@@ -5,16 +5,33 @@ import torch
 import pandas as pd
 import numpy as np
 from huggingface_hub import login  # [추가]
-login(token="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")
+login(token="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")
 from llama_finetuner_logit_cp_share import LlamaFinetuner
 from sklearn.model_selection import train_test_split
 from data_utils_share import *
 from transformers import set_seed
 
 def prepare_data(data_seed):
-    # 상대 경로로 타겟 데이터 로드
-    file_path = f"../data/target_data_for_aft_seed{data_seed}.csv"
+    # [수정 후] 현재 파일 위치를 기준으로 한 '절대 경로' 사용 (가장 안전함)
+    # 1. 현재 이 스크립트(main_logit...py)가 있는 폴더 경로 (regression 폴더)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 2. 그 상위 폴더 (SurvLIFT 프로젝트 루트)
+    project_root = os.path.dirname(script_dir)
+    
+    # 3. 데이터 파일 경로 결합 (SurvLIFT/data/target_data_for_aft_seed1.csv)
+    file_path = os.path.join(project_root, "data", f"target_data_for_aft_seed{data_seed}.csv")
+    
+    print(f"Loading data from: {file_path}") # 경로 확인용 로그 출력
+
     if not os.path.exists(file_path):
+        # 파일이 진짜 없는 경우를 대비해 현재 data 폴더에 뭐가 있는지 보여줌
+        data_dir = os.path.dirname(file_path)
+        if os.path.exists(data_dir):
+            print(f"Files in data dir: {os.listdir(data_dir)}")
+        else:
+            print(f"Data directory does not exist: {data_dir}")
+            
         raise FileNotFoundError(f"Data file not found: {file_path}")
         
     df = pd.read_csv(file_path)
@@ -69,10 +86,18 @@ def main(args):
     write_jsonl('\n'.join(train_prompts), train_js_path)
     write_jsonl('\n'.join(val_prompts), val_js_path)
     write_jsonl('\n'.join(test_prompts), test_js_path)
-    #fallback_means 처리 (None)
-    # 원본: build_group_means(...) 함수로 그룹별 평균 Hazard를 미리 계산해 뒀습니다. (모델이 답을 못 낼 경우 대타로 쓰기 위해)
-    # Fallback means는 필요 시 구현 (여기서는 생략 가능하거나 train 데이터 기반으로 계산)
-    fallback_means = None 
+    
+    # [수정 후] 
+    # 1. Train 데이터를 사용해 그룹별 평균(족보) 생성
+    # (주의: make_target.py를 통해 만들어진 csv에는 'target_time' 컬럼이 있어야 합니다)
+    print("Building group means for fallback...")
+    
+    # data_utils_share.py에 추가한 build_time_group_means 함수 사용
+    group_means_dict = build_time_group_means(train, target_col="target_time")
+    
+    # 2. 전체 평균도 미리 계산 (Global Mean) - 최후의 보루
+    train_mean = train['target_time'].mean()
+    print(f"Train Global Mean: {train_mean:.4f}") 
     
     print('Start train...')
     finetuner = LlamaFinetuner(
@@ -100,7 +125,7 @@ def main(args):
                     unique_validate_df = None,  # 시간 예측에서는 불필요
                     interp_method = args.interp_method,
                     min_g = args.min_g,
-                    fallback_means = fallback_means
+                    fallback_means = group_means_dict
                     )
     
     # --- 평가 (Evaluate) ---
@@ -114,11 +139,17 @@ def main(args):
     test_truth = [float(s.split('@@@', 1)[0].strip()) for s in test_completions]
     
     # 예측
+    # [수정 후]
     ans, invalid_ratio, final_invalid_ratio = finetuner.generate(
         text_lst=test_prompts_loaded, 
         max_token=10, 
         batch_size=args.batch_size, 
-        valid_mean=np.mean(test_truth)
+        
+        # 1. 최후의 보루: Train 데이터의 전체 평균 사용 (정석)
+        valid_mean=train_mean, 
+        
+        # 2. 1차 방어막: Train 데이터로 만든 그룹별 평균 족보 사용
+        fallback_means=group_means_dict
     )
 
     print("Predictions sample:", ans[:5])

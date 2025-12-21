@@ -16,11 +16,11 @@ from peft import get_peft_model, LoraConfig
 from data_utils_share import *
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from lifelines.utils import concordance_index
 from torch.optim import AdamW
 import time
 from transformers import LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper
-
+# [수정/추가] data_utils_share에서 새로 만든 Lookup 함수 임포트
+from data_utils_share import lookup_time_from_groups, extract_prompts, extract_completion, parse_number_4dec, extract_variable
 class CleanLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids, scores):
         # FP32로 변환 + NaN/Inf 제거 + 과도한 값 클램프
@@ -137,15 +137,15 @@ class LlamaFinetuner:
         dataset = LlamaDataset(json_lst, self.tokenizer)
         return dataset
 
-    def train(self, train_jsonl, val_jsonl, unique_validate_df,
+    def train(self, train_jsonl, val_jsonl, unique_validate_df, # unique_validate_df는 안 쓰지만 호환성 위해 남겨둠
               epochs=3,
               batch_size=4,
               lr=1e-5,
               weight_decay=0.01,
               warmup_steps=6,
               saving_checkpoint=True,
-              interp_method="locf",
-              min_g = 1e-10,
+              interp_method="locf", # 안 씀
+              min_g = 1e-10,        # 안 씀
               fallback_means=None
               ):
         
@@ -158,163 +158,20 @@ class LlamaFinetuner:
         total_steps = len(train_loader) * epochs
         
         self.train_loss_list, self.val_loss_list = [], []
-        val_cindex = []
-        val_ibs = []
+        val_rmse_list = []  # [수정] C-index 대신 RMSE 저장
         misclassified = []
         misclassified2 = []
         
-        # # zero-shot
-        # train_loss0, val_loss0, val_cindex0, val_ibs0, invalid_ratio0, final_invalid_ratio0 = self.evaluate_epoch0_model(train_loader, val_loader, val_jsonl, batch_size, unique_validate_df, interp_method, min_g, fallback_means)
-        
-        # self.train_loss_list.append(train_loss0)
-        # self.val_loss_list.append(val_loss0)
-        # val_cindex.append(val_cindex0)
-        # val_ibs.append(val_ibs0)
-        # misclassified.append(invalid_ratio0)
-        # misclassified2.append(final_invalid_ratio0)
-
-        # optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
-        
-        # best_loss = np.inf
-        # for epoch in range(epochs):
-        #     self.model.train()
-        #     tqdm_object = tqdm(train_loader, total=len(train_loader), desc=f"Epoch: {epoch + 1}", dynamic_ncols=True)
-        #     train_loss = []
-        #     for batch in tqdm_object:
-        #         self.model.zero_grad()
-        #         input_ids, attention_mask, labels = [b.to(self.device) for b in batch]
-        #         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)   
-        #         loss = outputs.loss
-                
-        #         loss.backward()
-        #         optimizer.step()
-        #         scheduler.step()
-        #         train_loss.append(loss.detach().item())
-        #         tqdm_object.set_postfix(train_loss=np.mean(train_loss))
-            
-        #     val_loss = self.validate(val_loader)
-            
-        #     self.train_loss_list.append(np.mean(train_loss))
-        #     self.val_loss_list.append(val_loss)
-        #     print(f"Epoch {epoch+1}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}")
-
-        #     val_prompts = extract_prompts(val_jsonl, '')
-        #     val_truth = extract_completion(val_jsonl)
-
-        #     val_generated, invalid_ratio, final_invalid_ratio = self.generate(text_lst=val_prompts, max_token=10, batch_size=batch_size, valid_mean = 0.0, fallback_means=fallback_means)
-        #     print("validate answer: ",val_generated)
-
-        #     ids = extract_id(val_prompts)
-        #     times = extract_time2(val_prompts)
-            
-        #     val_preds = val_generated
-        #     val_truth = [float(s.split('@@@', 1)[0].strip()) for s in val_truth]
-            
-        #     print(f"Ratio of invalid answer: {invalid_ratio}")
-            
-        #     df = pd.DataFrame({
-        #         'ids': ids,
-        #         'times': times,
-        #         'hazard_true': val_truth,
-        #         'hazard_pred': val_preds
-        #     })
-
-        #     df_with_survival = cumulative_hazard_trap_scipy(df, id_col="ids", time_col="times", hazard_col="hazard_pred")
-            
-        #     df_unique = df_with_survival.merge(
-        #         unique_validate_df[['id','time','status']],
-        #         left_on=['ids','times'],  
-        #         right_on=['id','time'],
-        #         how='inner'
-        #     ).drop(columns=['id','time']) \
-        #     .rename(columns={'ids':'id', 'times':'time'})
-
-        #     S_at_T = df_unique['S'].tolist()
-        #     risk_scores=[-s for s in S_at_T]
-        #     val_c_index=concordance_index(df_unique['time'].tolist(),risk_scores, df_unique['status'].tolist())
-            
-        #     event_df = unique_validate_df.rename(columns={'time': 'Y', 'status': 'delta'}).copy()
-        #     hz_use = df_with_survival[['ids', 'times', 'S']].copy()
-        #     hz_use = hz_use.rename(columns={'ids': 'id', 'times': 'time', 'S': 'survival_prob'})
-        #     BS_df = brier_ipcw(hz_use, event_df[['id','Y','delta']], method=interp_method, min_g=min_g, model="SurvLIFT")
-        #     ibs = ibs_from_bs(BS_df)
-            
-        #     val_cindex.append(val_c_index)
-        #     val_ibs.append(ibs)
-        #     misclassified.append(invalid_ratio)
-        #     misclassified2.append(final_invalid_ratio)
-            
-        #     improved = (val_loss <= best_loss)
-        #     if improved:
-        #         best_loss = val_loss
-        #         es_counter = 0
-        #         print(f"[BEST] val_loss improved to {best_loss:.6f} at epoch {epoch+1}")
-        #         print(f"Saving the best model with loss {val_loss:.4f}")
-        #         if saving_checkpoint:
-        #             self.save_model(epoch=epoch+1, val_c_index=val_c_index, val_ibs=ibs,
-        #                             val_loss=val_loss, invalid_ratio=invalid_ratio,
-        #                             final_invalid_ratio=final_invalid_ratio)
-        #     else:
-        #         es_counter += 1
-        #         if es_counter >= 5:
-        #             print(f"[Early Stopping] no val_loss improvement for 5 epochs. Stop at epoch {epoch+1}.")
-        #             break
-
-        # metrics = {
-        #     'train_loss':self.train_loss_list,
-        #     'val_loss': self.val_loss_list,
-        #     'val_cindex': val_cindex,
-        #     'val_ibs': val_ibs,
-        #     'invalid_answer_ratio': misclassified,
-        #     'final_invalid_answer_ratio': misclassified2
-        # }
-
-        # with open(os.path.join(self.output_dir, "validation_metrics.json"), "w") as f:
-        #     json.dump(metrics, f, indent=2)
-        
-        # epochs_range = list(range(len(self.train_loss_list)))
-
-        # plot_filename = os.path.join(self.output_dir, f"loss_metric_plot.png")
-        # fig, ax = plt.subplots(figsize=(8,5))
-        # ax2 = ax.twinx()
-
-        # l_train, = ax.plot(epochs_range, metrics['train_loss'],
-        #                 marker='o', color='#204e6e', label="Train loss")
-        # l_val,   = ax.plot(epochs_range, metrics['val_loss'],
-        #                 marker='o', color='#ff7f0e', label="Validation loss")
-
-        # ax.set_xlabel("Epochs")
-        # ax.set_ylabel("Loss")
-        # ax.grid(True, linestyle=':', alpha=0.6)
-
-        # m_c,   = ax2.plot(epochs_range, metrics['val_cindex'],
-        #                 marker='o', color='#d62728', label="C-index")
-        # m_ibs, = ax2.plot(epochs_range, metrics['val_ibs'],
-        #                 marker='o', color='purple', label="IBS")
-        # m_inv, = ax2.plot(epochs_range, metrics['invalid_answer_ratio'],
-        #                 marker='o', color='#2ca02c', label="Invalid answer ratio")
-
-        # ax2.set_ylabel("Metrics")
-        # lines = [l_train, l_val, m_c, m_ibs, m_inv]
-        # labels = [h.get_label() for h in lines]
-        # ax.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=5)
-
-        # plt.tight_layout()
-        # plt.show()
-        # fig.savefig(plot_filename, dpi=600)
-        # ... (for epoch 루프가 끝난 직후) ...
-
-        # [수정] 메트릭 딕셔너리 (MAE 저장)
-        # Zero-shot 평가 (위에서 수정한 함수가 호출됨)
-        train_loss0, val_loss0, val_mae0, _, invalid_ratio0, final_invalid_ratio0 = self.evaluate_epoch0_model(
+        # Zero-shot 평가 (수정된 evaluate_epoch0_model 사용)
+        train_loss0, val_loss0, val_rmse0, _, invalid_ratio0, final_invalid_ratio0 = self.evaluate_epoch0_model(
             train_loader, val_loader, val_jsonl, batch_size, unique_validate_df, interp_method, min_g, fallback_means
         )
         
         self.train_loss_list.append(train_loss0)
         self.val_loss_list.append(val_loss0)
-        # val_cindex 리스트는 이제 MAE를 저장하는 용도로 씁니다 (변수명은 그대로 둬도 무방)
-        val_metric_list = [val_mae0] 
+        val_rmse_list.append(val_rmse0)
+        misclassified.append(invalid_ratio0)
+        misclassified2.append(final_invalid_ratio0)
 
         optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
@@ -322,38 +179,59 @@ class LlamaFinetuner:
         best_loss = np.inf
         
         for epoch in range(epochs):
-            # ... (학습 Loop 코드는 그대로 유지) ...
+            self.model.train()
+            # ... (학습 Loop 코드는 기존과 동일하므로 생략) ...
+            tqdm_object = tqdm(train_loader, total=len(train_loader), desc=f"Epoch: {epoch + 1}", dynamic_ncols=True)
+            train_loss = []
+            for batch in tqdm_object:
+                self.model.zero_grad()
+                input_ids, attention_mask, labels = [b.to(self.device) for b in batch]
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)   
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                train_loss.append(loss.detach().item())
+                tqdm_object.set_postfix(train_loss=np.mean(train_loss))
             
             val_loss = self.validate(val_loader)
-            self.train_loss_list.append(np.mean(train_loss0))
+            
+            self.train_loss_list.append(np.mean(train_loss))
             self.val_loss_list.append(val_loss)
             print(f"Epoch {epoch+1}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}")
 
-            # [수정] Validation 평가 (MAE 계산)
+            # [수정] Validation 평가: RMSE 계산
             val_prompts = extract_prompts(val_jsonl, '')
             val_truth = extract_completion(val_jsonl)
-            
+
+            # Generate 수행
             val_generated, invalid_ratio, final_invalid_ratio = self.generate(
-                text_lst=val_prompts, max_token=10, batch_size=batch_size, valid_mean=0.0, fallback_means=fallback_means
+                text_lst=val_prompts, max_token=10, batch_size=batch_size, 
+                valid_mean=0.0, fallback_means=fallback_means
             )
             
+            # 문자열 -> 숫자 변환
             val_preds = np.array(val_generated)
             val_truth_vals = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
             
-            # MAE 계산
-            val_mae = np.mean(np.abs(val_truth_vals - val_preds))
-            val_metric_list.append(val_mae)
+            # RMSE 계산
+            mse = np.mean((val_truth_vals - val_preds)**2)
+            val_rmse = np.sqrt(mse)
             
-            print(f"Epoch {epoch+1} Validation MAE: {val_mae:.4f}") # 로그 출력
+            print(f"Epoch {epoch+1} RMSE: {val_rmse:.4f}, Invalid Ratio: {invalid_ratio:.4f}")
 
-            # Early Stopping 및 모델 저장 로직
+            val_rmse_list.append(val_rmse)
+            misclassified.append(invalid_ratio)
+            misclassified2.append(final_invalid_ratio)
+            
+            # Early Stopping Check
             improved = (val_loss <= best_loss)
             if improved:
                 best_loss = val_loss
                 es_counter = 0
+                print(f"[BEST] val_loss improved. Saving model...")
                 if saving_checkpoint:
-                    # save_model 호출 시 MAE를 c_index 자리에 넣어 전달 (혹은 save_model 인자 수정 필요)
-                    self.save_model(epoch=epoch+1, val_c_index=val_mae, val_ibs=0.0,
+                    self.save_model(epoch=epoch+1, val_metric=val_rmse, # 이름 변경
                                     val_loss=val_loss, invalid_ratio=invalid_ratio,
                                     final_invalid_ratio=final_invalid_ratio)
             else:
@@ -362,50 +240,37 @@ class LlamaFinetuner:
                     print(f"Early stopping at epoch {epoch+1}")
                     break
 
-        # ... (뒷부분 그래프 그리기 코드는 삭제하거나 주석 처리) ...   
+        # [수정] 메트릭 저장 (RMSE로 변경)
         metrics = {
             'train_loss': self.train_loss_list,
             'val_loss': self.val_loss_list,
-            'val_mae': val_metric_list,           # C-index 대신 MAE 리스트 저장
+            'val_rmse': val_rmse_list,
             'invalid_answer_ratio': misclassified,
             'final_invalid_answer_ratio': misclassified2
         }
 
-        # JSON 파일로 저장
         with open(os.path.join(self.output_dir, "validation_metrics.json"), "w") as f:
             json.dump(metrics, f, indent=2)
         
-        # [수정] 결과 그래프 그리기 (Loss & MAE)
+        # [수정] 그래프 그리기 (RMSE)
         epochs_range = list(range(len(self.train_loss_list)))
-
         plot_filename = os.path.join(self.output_dir, f"loss_metric_plot.png")
         fig, ax = plt.subplots(figsize=(8,5))
-        ax2 = ax.twinx() # 오른쪽 Y축 생성
+        ax2 = ax.twinx()
 
-        # 왼쪽 축: Loss (Train/Val)
-        l_train, = ax.plot(epochs_range, metrics['train_loss'],
-                        marker='o', color='#204e6e', label="Train loss")
-        l_val,   = ax.plot(epochs_range, metrics['val_loss'],
-                        marker='o', color='#ff7f0e', label="Validation loss")
-
+        l_train, = ax.plot(epochs_range, metrics['train_loss'], marker='o', color='#204e6e', label="Train loss")
+        l_val,   = ax.plot(epochs_range, metrics['val_loss'], marker='o', color='#ff7f0e', label="Validation loss")
         ax.set_xlabel("Epochs")
         ax.set_ylabel("Loss")
-        ax.grid(True, linestyle=':', alpha=0.6)
 
-        # 오른쪽 축: MAE (빨간색)
-        # 기존 val_cindex, val_ibs 그리는 부분 삭제하고 MAE로 대체
-        m_mae, = ax2.plot(epochs_range, metrics['val_mae'],
-                        marker='o', color='#d62728', label="Validation MAE")
-        
-        ax2.set_ylabel("MAE (Years)") # 단위: 년
-        
-        # 범례(Legend) 합치기
-        lines = [l_train, l_val, m_mae]
+        # RMSE Plot
+        m_rmse, = ax2.plot(epochs_range, metrics['val_rmse'], marker='o', color='#d62728', label="Val RMSE")
+        ax2.set_ylabel("RMSE")
+
+        lines = [l_train, l_val, m_rmse]
         labels = [h.get_label() for h in lines]
         ax.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)
-
         plt.tight_layout()
-        # plt.show() # 서버에서는 창을 띄울 수 없으므로 주석 처리 권장
         fig.savefig(plot_filename, dpi=300)
         plt.close() # 메모리 해제
 
@@ -427,6 +292,7 @@ class LlamaFinetuner:
         device = self.device
         results = [None] * len(text_lst)
 
+        # 1. 1차 시도 (Greedy)
         for i in range(0, len(text_lst), batch_size):
             texts = text_lst[i:i+batch_size]
             try:
@@ -440,209 +306,119 @@ class LlamaFinetuner:
                         do_sample=False,
                         pad_token_id=self.tokenizer.eos_token_id,
                     )
-                
-                gen_texts = [
-                    self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True)
-                    for b in range(out_ids.size(0))
-                ]
+                gen_texts = [self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True) for b in range(out_ids.size(0))]
                 print(gen_texts)
-                
                 for j, txt in enumerate(gen_texts):
-                    val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
-                    results[i + j] = val
+                    results[i + j] = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
             except Exception as e:
                 print(e); time.sleep(2)
-        failed_idx = [k for k, v in enumerate(results) if v is None]
-        failed_count = len(failed_idx)
-        print(results)
-        print(f"[generate] failed: {failed_count} / {len(text_lst)}")
         
+        # 1차 실패율 계산
+        first_failed_count = sum(1 for v in results if v is None)
+        invalid_ratio = first_failed_count / len(text_lst)
+
+        # 2. 재시도 (Sampling)
         for ret in range(retries):
-            print("Retry: ", ret+1)
             todo_idx = [k for k, v in enumerate(results) if v is None]
-            if not todo_idx:
-                break
+            if not todo_idx: break
+            print(f"Retry {ret+1}: {len(todo_idx)} items")
             
             for s in range(0, len(todo_idx), batch_size):
                 idx_chunk = todo_idx[s:s+batch_size]
                 texts = [text_lst[k] for k in idx_chunk]
                 try:
                     with torch.no_grad():
-                        toks = self.tokenizer(texts, truncation=True, padding=True,
-                                            max_length=1024, return_tensors='pt').to(device)
+                        toks = self.tokenizer(texts, truncation=True, padding=True, max_length=1024, return_tensors='pt').to(device)
                         T_in = toks['input_ids'].shape[1]
-                        processors = LogitsProcessorList([
-                            CleanLogitsProcessor(),
-                            TemperatureLogitsWarper(max(valid_temperature, 1e-5))  
-                        ])
+                        processors = LogitsProcessorList([CleanLogitsProcessor(), TemperatureLogitsWarper(max(valid_temperature, 1e-5))])
                         with torch.amp.autocast(device_type="cuda",enabled=False):
-                            out_ids = self.model.generate(
-                                **toks,
-                                max_new_tokens=max_token,
-                                do_sample=True,
-                                temperature=valid_temperature,
-                                logits_processor=processors,
-                                # top_p=1.0,
-                                pad_token_id=self.tokenizer.eos_token_id,
-                            )
-                    gen_texts = [
-                        self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True)
-                        for b in range(out_ids.size(0))
-                    ]
+                            out_ids = self.model.generate(**toks, max_new_tokens=max_token, do_sample=True, temperature=valid_temperature, logits_processor=processors, pad_token_id=self.tokenizer.eos_token_id)
+                    gen_texts = [self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True) for b in range(out_ids.size(0))]
                     print(gen_texts)
                     for j, txt in enumerate(gen_texts):
-                        k = idx_chunk[j]
                         val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
-                        if val is not None:
-                            results[k] = val
-                except RuntimeError as e:
-                    print(f"[sampling error -> greedy fallback] {e}")
-                    try:
-                        with torch.no_grad(), torch.amp.autocast(device_type="cuda",enabled=False):
-                            out_ids = self.model.generate(
-                                **toks,
-                                max_new_tokens=max_token,
-                                do_sample=False,
-                                pad_token_id=self.tokenizer.eos_token_id,
-                            )
-                        gen_texts = [
-                            self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True)
-                            for b in range(out_ids.size(0))
-                        ]
-                        for j, txt in enumerate(gen_texts):
-                            k = idx_chunk[j]
-                            val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
-                            if val is not None:
-                                results[k] = val
-                    except Exception as ee:
-                        print(f"[greedy fallback error] {ee}")
+                        if val is not None: results[idx_chunk[j]] = val
+                except Exception as e: print(e)
+
+        # 3. Fallback
         failed_idx = [k for k, v in enumerate(results) if v is None]
-        failed_count = len(failed_idx)
-        print(f"[after temperature] failed after {retries} retries: {failed_count} / {len(text_lst)}")
-        invalid_ratio = failed_count / len(text_lst)
-        
         if failed_idx and fallback_means is not None:
             failed_prompts = [text_lst[k] for k in failed_idx]
-            parsed = extract_variable(failed_prompts)  # {"age":[], "trt":[], "t":[]}
-            
+            parsed = extract_variable(failed_prompts)
             for off, k in enumerate(failed_idx):
-                if results[k] is not None:
-                    continue
+                if results[k] is not None: continue
                 filled = float(valid_mean)
                 try:
-                    age_i = parsed["age"][off]
-                    trt_i = parsed["trt"][off]
-                    t_i   = parsed["t"][off]
-                except Exception as e:
-                    print(f"[fallback parse error idx={k}] {e}")
-                    results[k] = filled
-                    continue
-                if (fallback_means is not None) and (age_i is not None) and (trt_i is not None):
-                            try:
-                                cand = fallback_lookup_from_means(
-                                    age=age_i, trt=trt_i, t_key=t_i,
-                                    means=fallback_means, clip_min=clip_min, clip_max=clip_max
-                                )
-                                if cand is not None:
-                                    filled = float(cand)
-                            except Exception as e:
-                                print(f"[fallback lookup error idx={k}] {e}")
+                    age_i, trt_i = parsed["age"][off], parsed["trt"][off]
+                    if age_i is not None and trt_i is not None:
+                        cand = lookup_time_from_groups(age_i, trt_i, fallback_means)
+                        if cand is not None: filled = float(cand)
+                except: pass
                 results[k] = float(filled)
-        failed_idx = [k for k, v in enumerate(results) if v is None]
-        failed_count = len(failed_idx)
-        print(results)
-        print(f"[generate] failed: {failed_count} / {len(text_lst)}")
-        final_invalid_ratio = failed_count / len(text_lst)
+
+        # 최종 실패율 계산
+        final_failed_count = sum(1 for v in results if v is None)
+        final_invalid_ratio = final_invalid_ratio = final_failed_count / len(text_lst)
         
+        # None 제거
         results = [float(valid_mean) if (v is None or v != v) else float(v) for v in results]
+        
         return results, invalid_ratio, final_invalid_ratio
     
     def evaluate_epoch0_model(self, train_loader, val_loader, val_jsonl,  batch_size, unique_validate_df, interp_method, min_g, fallback_means):
         self.model.eval()
         tqdm_object = tqdm(train_loader, total=len(train_loader), desc=f"Epoch: 0", dynamic_ncols=True)
         tr_loss = []
+        
         with torch.no_grad():
             for batch in tqdm_object:
                 input_ids, attention_mask, labels = [b.to(self.device) for b in batch]
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss
-
-                tr_loss.append(loss.detach().item())
+                
+                # [오타 수정] 사용자님이 보내주신 코드에 r_loss라고 되어 있었음 -> tr_loss로 수정
+                tr_loss.append(loss.detach().item()) 
                 tqdm_object.set_postfix(train_loss=np.mean(tr_loss))
+        
         val_loss = self.validate(val_loader)
         print(f"Epoch 0: Train Loss: {np.mean(tr_loss):.4f}, Val Loss: {val_loss:.4f}")
         
-        # val_prompts = extract_prompts(val_jsonl, '')
-        # val_truth = extract_completion(val_jsonl)
-
-        # val_generated, invalid_ratio, final_invalid_ratio = self.generate(text_lst=val_prompts, max_token=10, batch_size=batch_size, valid_mean=0.0, fallback_means=fallback_means)
-        
-        # ids = extract_id(val_prompts)
-        # times = extract_time2(val_prompts)
-        
-        # val_preds = val_generated
-        # val_truth = [float(s.split('@@@', 1)[0].strip()) for s in val_truth]
-
-        # df = pd.DataFrame({
-        #     'ids': ids,
-        #     'times': times,
-        #     'hazard_true': val_truth,
-        #     'hazard_pred': val_preds
-        # })
-        
-        # df_with_survival = cumulative_hazard_trap_scipy(df, id_col="ids", time_col="times", hazard_col="hazard_pred")
-        
-        # df_unique = df_with_survival.merge(
-        #     unique_validate_df[['id','time','status']],
-        #     left_on=['ids','times'], 
-        #     right_on=['id','time'],  
-        #     how='inner'
-        # ).drop(columns=['id','time']) \
-        # .rename(columns={'ids':'id', 'times':'time'})
-                
-        # S_at_T = df_unique['S'].tolist()
-        # risk_scores=[-s for s in S_at_T]
-        # val_c_index=concordance_index(df_unique['time'].tolist(),risk_scores, df_unique['status'].tolist())
-                
-        # event_df = unique_validate_df.rename(columns={'time': 'Y', 'status': 'delta'}).copy()
-        # hz_use = df_with_survival[['ids', 'times', 'S']].copy()
-        # hz_use = hz_use.rename(columns={'ids': 'id', 'times': 'time', 'S': 'survival_prob'})
-        # BS_df = brier_ipcw(hz_use, event_df[['id','Y','delta']], method=interp_method, min_g=min_g, model="SurvLIFT")
-        # ibs = ibs_from_bs(BS_df)
-
-        # return np.mean(tr_loss), val_loss, val_c_index, ibs, invalid_ratio, final_invalid_ratio
-        # [수정] Validation 평가 로직을 시간 예측(MAE)으로 변경
         val_prompts = extract_prompts(val_jsonl, '')
         val_truth = extract_completion(val_jsonl)
 
-        # valid_mean=0.0 대신 안전하게 정답의 평균값 등을 넣을 수 있으나 여기선 0.0 유지
+        # [논리 수정] 0.0 대신 족보에 있는 '전체 평균'을 기본값으로 사용
+        current_valid_mean = 0.0
+        if fallback_means is not None and "global_mean" in fallback_means:
+            current_valid_mean = fallback_means["global_mean"]
+
         val_generated, invalid_ratio, final_invalid_ratio = self.generate(
-            text_lst=val_prompts, max_token=10, batch_size=batch_size, valid_mean=0.0, fallback_means=fallback_means
+            text_lst=val_prompts, 
+            max_token=10, 
+            batch_size=batch_size, 
+            valid_mean=current_valid_mean, # [수정] 0.0 -> 전체 평균값
+            fallback_means=fallback_means
         )
         
-        # 정답 및 예측값 추출
         val_preds = np.array(val_generated)
-        val_truth = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
+        val_truth_vals = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
 
-        # [핵심] MAE 계산
-        val_mae = np.mean(np.abs(val_truth - val_preds))
+        # RMSE 계산
+        mse = np.mean((val_truth_vals - val_preds)**2)
+        val_rmse = np.sqrt(mse)
         
-        # C-index, IBS 등은 계산하지 않음 (Dummy 값 반환)
-        return np.mean(tr_loss), val_loss, val_mae, 0.0, invalid_ratio, final_invalid_ratio
+        return np.mean(tr_loss), val_loss, val_rmse, 0.0, invalid_ratio, final_invalid_ratio
 
-
-    def save_model(self, epoch=None, val_c_index=None, val_ibs=None, val_loss=None, invalid_ratio=None, final_invalid_ratio=None):
+    def save_model(self, epoch=None, val_metric=None, val_loss=None, invalid_ratio=None, final_invalid_ratio=None, val_c_index=None, val_ibs=None):
         os.makedirs(self.output_dir, exist_ok=True)
         print("Saving model to %s" % self.output_dir)
         self.model.save_pretrained(self.output_dir)
         self.tokenizer.save_pretrained(self.output_dir)
 
-        if epoch is not None and val_c_index is not None:
+        if epoch is not None and val_metric is not None:
             info = {
                 "epoch": epoch,
                 "val_loss": val_loss,
-                "val_c_index": val_c_index,
-                "val_ibs": val_ibs,
+                "val_rmse": val_metric, # 결과 JSON 파일에 val_rmse로 저장
                 "invalid_ratio": invalid_ratio,
                 "final_invalid_ratio": final_invalid_ratio
             }
