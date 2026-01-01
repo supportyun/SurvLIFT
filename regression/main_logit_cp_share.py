@@ -4,12 +4,14 @@ import argparse
 import torch
 import pandas as pd
 import numpy as np
-from huggingface_hub import login  # [추가]
-login(token="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")
+from huggingface_hub import login
+import os
+#login(token=os.getenv("HF_TOKEN"))
 from llama_finetuner_logit_cp_share import LlamaFinetuner
 from sklearn.model_selection import train_test_split
-from data_utils_share import *
+from data_utils_share import * ####전부 import하는 것
 from transformers import set_seed
+from datetime import datetime  # 
 
 def prepare_data(data_seed):
     # [수정 후] 현재 파일 위치를 기준으로 한 '절대 경로' 사용 (가장 안전함)
@@ -39,7 +41,7 @@ def prepare_data(data_seed):
     # Train/Val/Test Split (기존 로직 유지)
     event_data = df[df['status'] == 1]
     censor_data = df[df['status'] == 0]
-
+    # train:validation:test = 8:1:1로 만드는 과정.
     event_train, event_temp = train_test_split(event_data, test_size=0.2, random_state=42)
     event_validate, event_test = train_test_split(event_temp, test_size=0.5, random_state=42)
     censor_train, censor_temp = train_test_split(censor_data, test_size=0.2, random_state=42)
@@ -52,10 +54,10 @@ def prepare_data(data_seed):
     return train, validate, test
 
 ### 프롬프트 변환, 변환후 jsonl 파일로 저장
-# args 는 터미널에 입력한 값들을 객체 형태로 저장, 실험 설정값들의 모음집이라고 보면 됨.
+# args 는 터미널에 입력한 값들을 객체 형태로 저장, 실험 설정값들의 모음집이라고 보면 됨. 예) arg.epochs
 def main(args):
     print(f"Prepare data (Seed: {args.data_seed})...")
-    set_seed(args.seed)
+    set_seed(args.seed) ##huggingface transformer 라이브러리 함수
     
     # 1. 데이터 로드
     train, validate, test = prepare_data(args.data_seed)
@@ -70,19 +72,22 @@ def main(args):
     train_prompts = df2prompts(train, data2text_cp2, init, end)
     val_prompts = df2prompts(validate, data2text_cp2, init, end)
     test_prompts = df2prompts(test, data2text_cp2, init, end)
-
+    #
     print("Save prompts...")
+    # [추가] 오늘 날짜를 '260101' (년월일) 형태로 자동으로 만듭니다.
+    today_date = datetime.now().strftime("%y%m%d")
     base_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 
-        f"results/250923/data{args.data_seed}/seed_{args.seed}"
+        f"results/{today_date}/data{args.data_seed}/seed_{args.seed}"
     )    
     output_dir = os.path.join(base_dir, f"epochs_{args.epochs}_lr_{args.lr}")
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True) # 덮어쓰기 가능
 
     train_js_path = os.path.join(output_dir, "synthetic_prompts_train.jsonl")
     val_js_path   = os.path.join(output_dir, "synthetic_prompts_val.jsonl")
     test_js_path  = os.path.join(output_dir, "synthetic_prompts_test.jsonl")
 
+    #딕셔너리가 리스트 안에 배열되어 있는데 이거를 \n을 기준으로 jsonl으로 합침
     write_jsonl('\n'.join(train_prompts), train_js_path)
     write_jsonl('\n'.join(val_prompts), val_js_path)
     write_jsonl('\n'.join(test_prompts), test_js_path)
@@ -104,12 +109,12 @@ def main(args):
         model_name=args.model_name,
         device=args.device,
         output_dir=output_dir,
-        load_in_4bit=args.load_in_4bit,
-        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
-        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype,
-        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
-        r=args.r,
-        lora_alpha=args.lora_alpha,
+        load_in_4bit=args.load_in_4bit, #4비트로 압축해서 GPU메모리 아끼기
+        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant, #이중 양자화
+        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype, #비트
+        bnb_4bit_quant_type=args.bnb_4bit_quant_type, #압축 방식
+        r=args.r, #LoRA를 사용하는데, rank를 의미
+        lora_alpha=args.lora_alpha, # Scaling Factor(학습 반영 비율)
         lora_dropout=args.lora_dropout,
         seed = args.seed
     )
@@ -119,7 +124,7 @@ def main(args):
                     epochs=args.epochs,
                     batch_size=args.batch_size,
                     lr=args.lr,
-                    weight_decay=args.weight_decay,
+                    weight_decay=args.weight_decay, #overfitting 방지
                     warmup_steps=args.warmup_steps,
                     saving_checkpoint=args.saving_checkpoint,
                     unique_validate_df = None,  # 시간 예측에서는 불필요
@@ -127,7 +132,7 @@ def main(args):
                     min_g = args.min_g,
                     fallback_means = group_means_dict
                     )
-    
+    ####Validation 관련 내용은 llama finetuner 파일에 있음.
     # --- 평가 (Evaluate) ---
     print("Start evaluate...")
     finetuner.load_model()
@@ -139,6 +144,9 @@ def main(args):
     test_truth = [float(s.split('@@@', 1)[0].strip()) for s in test_completions]
     
     # 예측
+    # ans, invalid_ratio, final_invalid_ratio
+    #  = finetuner.generate(text_lst=test_prompts, max_token=10,
+    #  batch_size=args.batch_size, valid_mean = 0.0) -> hazard 0 대신에 그냥 평균 수명으로...
     # [수정 후]
     ans, invalid_ratio, final_invalid_ratio = finetuner.generate(
         text_lst=test_prompts_loaded, 
@@ -189,7 +197,7 @@ def main(args):
     metrics = {
         "test_rmse": rmse,
         "invalid_answer_ratio": invalid_ratio,
-        "final_invalid_answer_ratio": final_invalid_ratio
+        "final_invalid_answer_ratio": final_invalid_ratio   ####invalid ratio의 차이
     }
     
     # test_metrics.json 파일로 저장
@@ -225,4 +233,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.device = torch.device(args.device)
     
-    main(args)
+    main(args) ### args는 설정값들의 모음

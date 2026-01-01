@@ -21,6 +21,7 @@ import time
 from transformers import LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper
 # [수정/추가] data_utils_share에서 새로 만든 Lookup 함수 임포트
 from data_utils_share import lookup_time_from_groups, extract_prompts, extract_completion, parse_number_4dec, extract_variable
+
 class CleanLogitsProcessor(LogitsProcessor):
     def __call__(self, input_ids, scores):
         # FP32로 변환 + NaN/Inf 제거 + 과도한 값 클램프
@@ -57,8 +58,6 @@ class LlamaDataset(Dataset):
             b_labels = self.input_ids[i].clone()
             b_labels[:-completion_lens[i]] = -100  
             self.labels.append(b_labels)
-        
-
             
     def __len__(self):
         return len(self.labels)
@@ -82,7 +81,6 @@ class LlamaFinetuner:
                  seed=1024):
         
         self.device = device
-
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device.index)
 
@@ -128,8 +126,6 @@ class LlamaFinetuner:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=bnb_config)
         self.model = get_peft_model(self.model, lora_config) 
         self.model.to(self.device)
-        if isinstance(self.device, torch.device) and self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
         
     def prepare_data(self, jsonl_path):
         with open(jsonl_path, 'r') as json_file:
@@ -162,7 +158,7 @@ class LlamaFinetuner:
         misclassified = []
         misclassified2 = []
         
-        # Zero-shot 평가 (수정된 evaluate_epoch0_model 사용)
+        # Zero-shot 평가 (수정된 evaluate_epoch0_model 사용)########
         train_loss0, val_loss0, val_rmse0, _, invalid_ratio0, final_invalid_ratio0 = self.evaluate_epoch0_model(
             train_loader, val_loader, val_jsonl, batch_size, unique_validate_df, interp_method, min_g, fallback_means
         )
@@ -180,14 +176,13 @@ class LlamaFinetuner:
         
         for epoch in range(epochs):
             self.model.train()
-            # ... (학습 Loop 코드는 기존과 동일하므로 생략) ...
             tqdm_object = tqdm(train_loader, total=len(train_loader), desc=f"Epoch: {epoch + 1}", dynamic_ncols=True)
             train_loss = []
             for batch in tqdm_object:
                 self.model.zero_grad()
                 input_ids, attention_mask, labels = [b.to(self.device) for b in batch]
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)   
-                loss = outputs.loss
+                loss = outputs.loss # 내부적으로 Cross Entropy Loss 계산
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
@@ -195,34 +190,42 @@ class LlamaFinetuner:
                 tqdm_object.set_postfix(train_loss=np.mean(train_loss))
             
             val_loss = self.validate(val_loader)
-            
             self.train_loss_list.append(np.mean(train_loss))
             self.val_loss_list.append(val_loss)
             print(f"Epoch {epoch+1}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}")
 
-            # [수정] Validation 평가: RMSE 계산
-            val_prompts = extract_prompts(val_jsonl, '')
-            val_truth = extract_completion(val_jsonl)
+            # [수정] Validation 평가 데이터 준비
+            val_prompts = extract_prompts(val_jsonl, '') 
+            val_truth = extract_completion(val_jsonl) 
 
-            # Generate 수행
+            # 1. global_mean 설정 및 안전장치
+            g_mean = fallback_means.get("global_mean") if fallback_means else None
+            if g_mean is None:
+                print("Warning: global_mean not found in fallback_means. Using default 5.0")
+                g_mean = 5.0 # 수치적 안정성을 위해 0.0 대신 사용
+            
+            # 2. generate 호출
             val_generated, invalid_ratio, final_invalid_ratio = self.generate(
-                text_lst=val_prompts, max_token=10, batch_size=batch_size, 
-                valid_mean=0.0, fallback_means=fallback_means
+                text_lst=val_prompts, 
+                max_token=10, 
+                batch_size=batch_size, 
+                valid_mean=g_mean, 
+                fallback_means=fallback_means
             )
             
-            # 문자열 -> 숫자 변환
-            val_preds = np.array(val_generated)
+            # 문자열 -> 숫자 변환 및 RMSE 계산
+            val_preds = np.array(val_generated) 
             val_truth_vals = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
             
             # RMSE 계산
-            mse = np.mean((val_truth_vals - val_preds)**2)
-            val_rmse = np.sqrt(mse)
+            mse = np.mean((val_truth_vals - val_preds)**2) 
+            val_rmse = np.sqrt(mse) 
             
             print(f"Epoch {epoch+1} RMSE: {val_rmse:.4f}, Invalid Ratio: {invalid_ratio:.4f}")
 
             val_rmse_list.append(val_rmse)
-            misclassified.append(invalid_ratio)
-            misclassified2.append(final_invalid_ratio)
+            misclassified.append(invalid_ratio) # 1차 실패율
+            misclassified2.append(final_invalid_ratio) # Fallback 적용 후 실패율
             
             # Early Stopping Check
             improved = (val_loss <= best_loss)
@@ -231,7 +234,7 @@ class LlamaFinetuner:
                 es_counter = 0
                 print(f"[BEST] val_loss improved. Saving model...")
                 if saving_checkpoint:
-                    self.save_model(epoch=epoch+1, val_metric=val_rmse, # 이름 변경
+                    self.save_model(epoch=epoch+1, val_metric=val_rmse, 
                                     val_loss=val_loss, invalid_ratio=invalid_ratio,
                                     final_invalid_ratio=final_invalid_ratio)
             else:
@@ -272,7 +275,7 @@ class LlamaFinetuner:
         ax.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)
         plt.tight_layout()
         fig.savefig(plot_filename, dpi=300)
-        plt.close() # 메모리 해제
+        plt.close()
 
     def validate(self, val_loader):
         self.model.eval()
@@ -292,36 +295,31 @@ class LlamaFinetuner:
         device = self.device
         results = [None] * len(text_lst)
 
-        # 1. 1차 시도 (Greedy)
+        # 1. 1차 시도 (Greedy Search)
         for i in range(0, len(text_lst), batch_size):
             texts = text_lst[i:i+batch_size]
             try:
                 with torch.no_grad():
                     toks = self.tokenizer(texts, truncation=True, padding=True,
                                         max_length=1024, return_tensors='pt').to(device)
-                    T_in = toks['input_ids'].shape[1]  
+                    T_in = toks['input_ids'].shape[1] 
                     out_ids = self.model.generate(
                         **toks,
                         max_new_tokens=max_token,
-                        do_sample=False,
+                        do_sample=False, # Greedy
                         pad_token_id=self.tokenizer.eos_token_id,
                     )
                 gen_texts = [self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True) for b in range(out_ids.size(0))]
-                print(gen_texts)
                 for j, txt in enumerate(gen_texts):
                     results[i + j] = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
             except Exception as e:
-                print(e); time.sleep(2)
+                print(f"[greedy error] {e}"); time.sleep(2)
         
-        # 1차 실패율 계산
-        first_failed_count = sum(1 for v in results if v is None)
-        invalid_ratio = first_failed_count / len(text_lst)
-
-        # 2. 재시도 (Sampling)
+        # 2. 재시도 (Sampling with Retries)
         for ret in range(retries):
             todo_idx = [k for k, v in enumerate(results) if v is None]
             if not todo_idx: break
-            print(f"Retry {ret+1}: {len(todo_idx)} items")
+            print(f"Retry {ret+1}: {len(todo_idx)} items left")
             
             for s in range(0, len(todo_idx), batch_size):
                 idx_chunk = todo_idx[s:s+batch_size]
@@ -330,42 +328,65 @@ class LlamaFinetuner:
                     with torch.no_grad():
                         toks = self.tokenizer(texts, truncation=True, padding=True, max_length=1024, return_tensors='pt').to(device)
                         T_in = toks['input_ids'].shape[1]
-                        processors = LogitsProcessorList([CleanLogitsProcessor(), TemperatureLogitsWarper(max(valid_temperature, 1e-5))])
-                        with torch.amp.autocast(device_type="cuda",enabled=False):
-                            out_ids = self.model.generate(**toks, max_new_tokens=max_token, do_sample=True, temperature=valid_temperature, logits_processor=processors, pad_token_id=self.tokenizer.eos_token_id)
+                        processors = LogitsProcessorList([
+                            CleanLogitsProcessor(), 
+                            TemperatureLogitsWarper(max(valid_temperature, 1e-5))
+                        ])
+                        with torch.amp.autocast(device_type="cuda", enabled=False):
+                            out_ids = self.model.generate(
+                                **toks, 
+                                max_new_tokens=max_token, 
+                                do_sample=True, 
+                                temperature=valid_temperature, 
+                                logits_processor=processors, 
+                                pad_token_id=self.tokenizer.eos_token_id
+                            )
                     gen_texts = [self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True) for b in range(out_ids.size(0))]
-                    print(gen_texts)
                     for j, txt in enumerate(gen_texts):
                         val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
                         if val is not None: results[idx_chunk[j]] = val
-                except Exception as e: print(e)
+                
+                except RuntimeError as e:
+                    print(f"[sampling error -> greedy fallback] {e}")
+                    try:
+                        with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=False):
+                            out_ids = self.model.generate(**toks, max_new_tokens=max_token, do_sample=False, pad_token_id=self.tokenizer.eos_token_id)
+                        gen_texts = [self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True) for b in range(out_ids.size(0))]
+                        for j, txt in enumerate(gen_texts):
+                            val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
+                            if val is not None: results[idx_chunk[j]] = val
+                    except Exception as ee:
+                        print(f"[greedy fallback error] {ee}")
 
-        # 3. Fallback
+        # 실패율 계산
         failed_idx = [k for k, v in enumerate(results) if v is None]
+        invalid_ratio = len(failed_idx) / len(text_lst)
+        print(f"[generate] Model failed ratio (before fallback): {invalid_ratio:.4f}")
+
+        # 3. 최종 안전장치 (Fallback with Statistical Means)
         if failed_idx and fallback_means is not None:
             failed_prompts = [text_lst[k] for k in failed_idx]
             parsed = extract_variable(failed_prompts)
+            
             for off, k in enumerate(failed_idx):
                 if results[k] is not None: continue
-                filled = float(valid_mean)
+                
+                filled = float(valid_mean) 
                 try:
                     age_i, trt_i = parsed["age"][off], parsed["trt"][off]
                     if age_i is not None and trt_i is not None:
-                        cand = lookup_time_from_groups(age_i, trt_i, fallback_means)
+                        cand = lookup_time_from_groups(age=age_i, trt=trt_i, means_dict=fallback_means)
                         if cand is not None: filled = float(cand)
-                except: pass
+                except Exception as e:
+                    print(f"[fallback lookup error idx={k}] {e}")
+                
                 results[k] = float(filled)
 
-        # 최종 실패율 계산
-        final_failed_count = sum(1 for v in results if v is None)
-        final_invalid_ratio = final_invalid_ratio = final_failed_count / len(text_lst)
-        
-        # None 제거
         results = [float(valid_mean) if (v is None or v != v) else float(v) for v in results]
-        
+        final_invalid_ratio = sum(1 for v in results if v is None) / len(text_lst) #0이어야함
         return results, invalid_ratio, final_invalid_ratio
-    
-    def evaluate_epoch0_model(self, train_loader, val_loader, val_jsonl,  batch_size, unique_validate_df, interp_method, min_g, fallback_means):
+
+    def evaluate_epoch0_model(self, train_loader, val_loader, val_jsonl, batch_size, unique_validate_df, interp_method, min_g, fallback_means):
         self.model.eval()
         tqdm_object = tqdm(train_loader, total=len(train_loader), desc=f"Epoch: 0", dynamic_ncols=True)
         tr_loss = []
@@ -375,8 +396,6 @@ class LlamaFinetuner:
                 input_ids, attention_mask, labels = [b.to(self.device) for b in batch]
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss
-                
-                # [오타 수정] 사용자님이 보내주신 코드에 r_loss라고 되어 있었음 -> tr_loss로 수정
                 tr_loss.append(loss.detach().item()) 
                 tqdm_object.set_postfix(train_loss=np.mean(tr_loss))
         
@@ -386,8 +405,7 @@ class LlamaFinetuner:
         val_prompts = extract_prompts(val_jsonl, '')
         val_truth = extract_completion(val_jsonl)
 
-        # [논리 수정] 0.0 대신 족보에 있는 '전체 평균'을 기본값으로 사용
-        current_valid_mean = 0.0
+        current_valid_mean = 5.0
         if fallback_means is not None and "global_mean" in fallback_means:
             current_valid_mean = fallback_means["global_mean"]
 
@@ -395,20 +413,17 @@ class LlamaFinetuner:
             text_lst=val_prompts, 
             max_token=10, 
             batch_size=batch_size, 
-            valid_mean=current_valid_mean, # [수정] 0.0 -> 전체 평균값
+            valid_mean=current_valid_mean, 
             fallback_means=fallback_means
         )
         
         val_preds = np.array(val_generated)
         val_truth_vals = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
-
-        # RMSE 계산
-        mse = np.mean((val_truth_vals - val_preds)**2)
-        val_rmse = np.sqrt(mse)
+        val_rmse = np.sqrt(np.mean((val_truth_vals - val_preds)**2))
         
         return np.mean(tr_loss), val_loss, val_rmse, 0.0, invalid_ratio, final_invalid_ratio
 
-    def save_model(self, epoch=None, val_metric=None, val_loss=None, invalid_ratio=None, final_invalid_ratio=None, val_c_index=None, val_ibs=None):
+    def save_model(self, epoch=None, val_metric=None, val_loss=None, invalid_ratio=None, final_invalid_ratio=None):
         os.makedirs(self.output_dir, exist_ok=True)
         print("Saving model to %s" % self.output_dir)
         self.model.save_pretrained(self.output_dir)
@@ -418,13 +433,13 @@ class LlamaFinetuner:
             info = {
                 "epoch": epoch,
                 "val_loss": val_loss,
-                "val_rmse": val_metric, # 결과 JSON 파일에 val_rmse로 저장
+                "val_rmse": val_metric,
                 "invalid_ratio": invalid_ratio,
                 "final_invalid_ratio": final_invalid_ratio
             }
             with open(os.path.join(self.output_dir, "best_model_info.json"), "w") as f:
                 json.dump(info, f, indent=2)
-    
+
     def load_model(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.output_dir)
         base_model = AutoModelForCausalLM.from_pretrained(self.output_dir)
