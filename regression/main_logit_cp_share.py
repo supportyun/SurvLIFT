@@ -112,8 +112,9 @@ def main(args):
     group_means_dict = build_time_group_means(train, target_col="target_time")
     
     # 2. 전체 평균도 미리 계산 (Global Mean) - 최후의 보루
-    train_mean = train['target_time'].mean()
-    print(f"Train Global Mean: {train_mean:.4f}") 
+    # [수정] Train Mean도 소수점 2자리 반올림
+    train_mean = round(train['target_time'].mean(), 2)
+    print(f"Train Global Mean: {train_mean:.2f}") 
     
     print('Start train...')                 ##클래스 불러서 객체 만들기
     finetuner = LlamaFinetuner(
@@ -161,7 +162,7 @@ def main(args):
     #  = finetuner.generate(text_lst=test_prompts, max_token=10,
     #  batch_size=args.batch_size, valid_mean = 0.0) -> hazard 0 대신에 그냥 평균 수명으로...
     # [수정 후]
-    ans, invalid_ratio, final_invalid_ratio = finetuner.generate( ####이 부분에서
+    ans, invalid_ratio, final_invalid_ratio, test_logs = finetuner.generate( ####이 부분에서
         text_lst=test_prompts_loaded, 
         max_token=10, 
         batch_size=args.batch_size, 
@@ -170,8 +171,21 @@ def main(args):
         valid_mean=train_mean, 
         
         # 2. 1차 방어막: Train 데이터로 만든 그룹별 평균 족보 사용
-        fallback_means=group_means_dict
+        fallback_means=group_means_dict,
+        
+        # [수정] Log Scale 고려한 범위 설정 (Clip)
+        clip_min=-5.0,
+        clip_max=10.0,
+        
+        # [NEW] Test 상세 로그 받기
+        return_logs=True
     )
+
+    # [NEW] Test 상세 로그 파일 저장
+    log_df = pd.DataFrame(test_logs)
+    log_path = os.path.join(output_dir, "test_predictions_detailed_logs.csv")
+    log_df.to_csv(log_path, index=False, encoding='utf-8-sig')
+    print(f"Saved test logs to {log_path}")
 
     print("Predictions sample:", ans[:5])
 
@@ -195,15 +209,14 @@ def main(args):
     # [수정 3] 요약 결과 저장 (CSV 헤더 및 내용 변경)
     summary_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_summary_results.csv")
     
+    # 헤더가 없으면 새로 만듦 (Rank 컬럼 추가)
     if not os.path.exists(summary_file):
         with open(summary_file, "w") as f:
-            # 헤더에서 MAE, C_index 제거하고 RMSE 추가
-            f.write("Data_Seed,Model_Seed,RMSE,Invalid_Ratio\n")
+            f.write("Data_Seed,Model_Seed,Rank,LR,RMSE,Invalid_Ratio\n")
             
+    # 내용 추가 (Rank, LR 정보 포함)
     with open(summary_file, "a") as f:
-        # 내용도 RMSE로 변경
-        f.write(f"{args.data_seed},{args.seed},{rmse:.4f},{final_invalid_ratio:.4f}\n")
-        
+        f.write(f"{args.data_seed},{args.seed},{args.r},{args.lr},{rmse:.4f},{final_invalid_ratio:.4f}\n")
     print(f"Saved summary to {summary_file}")
 
     # [수정] 굳이 함수 만들지 않고 바로 딕셔너리 만들어서 저장

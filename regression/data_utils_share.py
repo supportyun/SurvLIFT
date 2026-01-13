@@ -31,7 +31,7 @@ def data2text_cp2(row, label=True, init='', end=''):
         f"At enrollment, the patient was {row['age']:.2f} years old, and "
         f"{'was treated with D-penicillamine' if row['trt'] == 1 else 'received placebo'}. "
         # [중요]질문을 '생존 시간 예측'으로 변경
-        f"Based on these features, predict the expected survival time (T) for this patient. "
+        f"Based on these features, predict the natural log of the expected survival time (log(T)) for this patient. "
         f"Output only one non-negative real number. No extra text."
     )
 
@@ -42,6 +42,7 @@ def data2text_cp2(row, label=True, init='', end=''):
     else:
         # [중요] 정답을 hazard가 아닌 'target_time'으로 변경
         # (make_target.py로 만든 파일에 이 컬럼이 있어야 함)
+        # [수정] 소수점 2자리 포맷팅 확인 (.2f)
         completion = f"{row['target_time']:.2f}" 
         final_prompt = "{\"prompt\":\"%s###\", \"completion\":\"%s@@@\"}" % (prompt, completion)
     return final_prompt
@@ -70,12 +71,12 @@ def build_time_group_means(train_df, target_col="target_time", age_col="age", tr
     
     # 위에서 만든 by_full을 딕셔너리 형태로 변환시켜줌
     means_dict = {
-        # [수정] 그룹 평균 반올림
+        # [수정] 그룹 평균 반올림 (소수점 2자리)
         (r["age_bin"], int(r[trt_col])): round(float(r[target_col]), 2)
         for _, r in by_full.iterrows() #_자리에는 index가 들어가고 r은 모든 데이터 뭉치
     }
     
-    # [수정] 전체 평균(Global Mean) 반올림
+    # [수정] 전체 평균(Global Mean) 반올림 (소수점 2자리)
     means_dict["global_mean"] = round(df[target_col].mean(), 2)
     
     return means_dict
@@ -109,15 +110,6 @@ def extract_id(prompts):
             ids.append(int(match.group(1))) #match.group(1)은 id의 문자열 버전, 괄호에 해당하는 값 불러옴
     return ids
 
-#extract_prompts를 이용해서 추출한 prompt에서 시간을 뽑아내는건데 이 경우에는 안씀
-# def extract_time2(prompts):
-#     times = []
-#     for prompt in prompts:
-#         match = re.search(r"at time ([\d\.]+)", prompt)
-#         if match:
-#             times.append(float(match.group(1).rstrip('.')))
-#     return times
-
 
 def calculate_mae(list1, list2):
 
@@ -126,33 +118,14 @@ def calculate_mae(list1, list2):
     
     return mean_absolute_error(list1, list2)
 
-##### 환자가 중도절단될 확룔 G(t)를 구하는 함수이다.
-# def fit_km_censor(event_df):
-#     kmf_c = KaplanMeierFitter()
-#     kmf_c.fit(durations=event_df['Y'].values,
-#               event_observed=(1 - event_df['delta'].values))
-    
-#     timeline = kmf_c.survival_function_.index.values
-#     surv_vals = kmf_c.survival_function_["KM_estimate"].values
-
-#     def step_eval(ts):
-#         ts = np.asarray(ts, dtype=float)
-#         idx = np.searchsorted(timeline, ts, side="right") - 1
-#         out = np.ones_like(ts, dtype=float)
-#         mask = idx >= 0
-#         out[mask] = surv_vals[idx[mask]]
-#         return out
-
-#     return kmf_c, step_eval
 
 #모델이 예측한 결과인 문자를 실수 형태로 바꿔주는 함수
-
-
+# [수정] Log Scale 고려하여 기본 Range 수정 및 파싱 후 Rounding 적용
 def parse_number_4dec(text: str,
                       stop_str: str = "@@@",
                       which: str = "last",       
-                      clip_min: Optional[float] = None,
-                      clip_max: Optional[float] = None):
+                      clip_min: Optional[float] = -5.0, # [수정] Log Scale 하한 (T ~= 0.006)
+                      clip_max: Optional[float] = 10.0): # [수정] Log Scale 상한 (T ~= 22000)
     
     # 1. stop_str(@@@)이 있으면 그 뒤는 과감히 자릅니다.
     # 예: "21.5@@@Compute..." -> "21.5"
@@ -179,7 +152,8 @@ def parse_number_4dec(text: str,
     if clip_max is not None and val > clip_max:
         val = clip_max
     
-    return val
+    # [수정] 파싱된 결과는 무조건 소수점 2자리로 반올림
+    return round(val, 2)
 
 
 ##prompt를 읽어서 원래 환자의 나이, 치료법을 딕셔너리 형태로 추출하는 함수

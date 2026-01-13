@@ -11,6 +11,7 @@ def process_seed(seed):
     # 1. 파일 경로 설정 (상대 경로 사용)
     input_filename = f"synthetic_pbc_data_N300_given_2_covariate_seed{seed}.csv"
     output_filename = f"target_data_for_aft_seed{seed}.csv"
+    beta_filename = f"beta_coefficients_seed{seed}.csv" # [수정] 베타값 저장 파일명 추가
     
     # [수정] 스크립트 파일의 위치를 기준으로 경로를 계산합니다.
     # 1. 현재 파일(make_target.py)이 있는 폴더 (SurvLIFT/regression)
@@ -21,6 +22,7 @@ def process_seed(seed):
     # 3. 데이터 폴더와 결합 (SurvLIFT/data)
     input_path = os.path.join(project_root, "data", input_filename)
     output_path = os.path.join(project_root, "data", output_filename)
+    beta_path = os.path.join(project_root, "data", beta_filename) # [수정]
     
     # 파일 존재 여부 확인
     if not os.path.exists(input_path):
@@ -41,6 +43,13 @@ def process_seed(seed):
     
     try:
         aft.fit(df[covariates], duration_col='time', event_col='status')
+        
+        # [수정] 통계적 분석을 위해 Beta 계수(파라미터) 저장
+        # aft.params_는 Series 형태이므로 DataFrame으로 변환 후 저장
+        beta_df = aft.params_.to_frame(name='coefficient')
+        beta_df.to_csv(beta_path, index=True)
+        print(f"  -> Beta 계수 저장 완료: {beta_path}")
+        
     except Exception as e:
         print(f"  - AFT 모델 적합 실패 (Seed {seed}): {e}")
         return
@@ -73,13 +82,21 @@ def process_seed(seed):
                 # e_i보다 큰 구간(더 살았을 구간)의 생존 곡선 가져오기
                 mask = kmf.survival_function_.index > e_i
                 surv_curve_after = kmf.survival_function_[mask]
-                
+
                 if not surv_curve_after.empty:
-                    # 잔여 수명 기대값 = (곡선 아래 면적) / 현재 생존확률
-                    area = np.trapz(surv_curve_after['KM_estimate'], surv_curve_after.index)
+                    # 잔여 수명 기대값 = sum_{k} S(e_k) * (e_{k+1} - e_k) / S(e_i)
+                    times = surv_curve_after.index.to_numpy()
+                    surv_vals = surv_curve_after["KM_estimate"].to_numpy()
+
+                    if len(times) > 1:
+                        deltas = np.diff(times)
+                        area = np.sum(surv_vals[:-1] * deltas)
+                    else:
+                        area = 0.0
+
                     expected_extra_resid = area / s_at_resid
-                    
-                    # 최종 타겟 = 관측된 시간 + 추가 예상 시간
+
+                    # 최종 타겟 = 관측된 시간 + 추가 예상 시간 (log T 기준)
                     target = row['log_time'] + expected_extra_resid
                 else:
                     target = row['log_time'] # 정보 부족 시 관측 시간 사용
@@ -89,19 +106,24 @@ def process_seed(seed):
         new_targets_log.append(target)
 
     # 7. 결과 저장
-    # 모델 학습용 (로그 스케일 & 원래 시간 스케일)
-    df['target_log_time'] = new_targets_log
-    df['target_time'] = np.round(np.exp(new_targets_log), 2) ## 소수 둘째자리까지 표현
-    df['age'] = np.round(df['age'], 2)## 소수 둘째자리까지 표현
+    # 모델 학습용 (로그 스케일)
+    # [수정] 소수 둘째자리까지 반올림 (LLM 입력 부담 완화)
+    df['target_log_time'] = np.round(new_targets_log, 2) 
+    
+    # [수정] data_utils에서 'target_time' 컬럼을 찾으므로, Log Scale 값을 여기에 넣어줍니다.
+    df['target_time'] = df['target_log_time']
+    
+    df['age'] = np.round(df['age'], 2) ## 소수 둘째자리까지 표현
+    
     # 필요한 컬럼만 저장 (원본 컬럼 + 타겟)
-    cols_to_save = ['id', 'trt', 'age', 'time', 'status', 'target_time', 'target_log_time']
+    cols_to_save = ['id', 'trt', 'age', 'time', 'status', 'target_log_time', 'target_time']
     df[cols_to_save].to_csv(output_path, index=False)
     
     print(f"[Done] Seed {seed} 완료! 저장 경로: {output_path}")
 
 
 def main():
-    print("=== 전체 Seed 데이터에 대한 Target 생성 시작 ===")
+    print("=== 전체 Seed 데이터에 대한 Target 생성 및 Beta 저장 시작 ===")
     # Seed 1부터 10까지 반복
     for seed in range(1, 11):
         process_seed(seed)

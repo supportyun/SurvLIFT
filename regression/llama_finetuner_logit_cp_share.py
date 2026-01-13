@@ -21,6 +21,7 @@ import time
 from transformers import LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper
 # [수정/추가] data_utils_share에서 새로 만든 Lookup 함수 임포트
 from data_utils_share import lookup_time_from_groups, extract_prompts, extract_completion, parse_number_4dec, extract_variable
+import pandas as pd # [수정] 로그 저장을 위해 Pandas 임포트
 
 # 여기서 input_ids는 사용자가 처음 입력한 질문, 모델이 방금가지 대답한 내용을 모두 합친 덩어리이다.
 class CleanLogitsProcessor(LogitsProcessor):
@@ -30,6 +31,7 @@ class CleanLogitsProcessor(LogitsProcessor):
         bad = ~torch.isfinite(scores)
         if bad.any():
             scores = scores.clone() # 원본을 복사(clone)한 뒤, 문제가 있는 위치(bad)의 점수를 -1e9(최하점)로 덮어씌워서 선택되지 않게 막는 것.
+            scores[bad] = -1e9
         scores = torch.clamp(scores, min=-1e9, max=1e9)
         return scores
 
@@ -173,8 +175,14 @@ class LlamaFinetuner:
         misclassified = []
         misclassified2 = []
         
-        # Zero-shot 평가 (수정된 evaluate_epoch0_model 사용)########
-        train_loss0, val_loss0, val_rmse0, _, invalid_ratio0, final_invalid_ratio0 = self.evaluate_epoch0_model(
+        # [추가됨] 상세 분석용 리스트 선언
+        greedy_success_rate_list = [] # 한 번에 성공한 비율
+        retry_success_rate_list = []  # 재시도로 성공한 비율
+        fallback_rate_list = []       # 통계적 대치로 메꿔진 비율
+
+        # Zero-shot 평가 (수정된 evaluate_epoch0_model 사용)
+        # [수정] 반환 변수 개수를 맞춰줍니다 (기존 0.0 처리하던 부분을 r_greedy0 등으로 교체)
+        train_loss0, val_loss0, val_rmse0, r_greedy0, r_retry0, r_fallback0, invalid_ratio0, final_invalid_ratio0 = self.evaluate_epoch0_model(
             train_loader, val_loader, val_jsonl, batch_size, unique_validate_df, interp_method, min_g, fallback_means
         )
         
@@ -183,7 +191,11 @@ class LlamaFinetuner:
         val_rmse_list.append(val_rmse0)
         misclassified.append(invalid_ratio0)
         misclassified2.append(final_invalid_ratio0)
-
+        
+        # [수정] 0.0 대신 실제 계산된 값(r_greedy0 등)을 리스트에 넣습니다.
+        greedy_success_rate_list.append(r_greedy0) 
+        retry_success_rate_list.append(r_retry0)
+        fallback_rate_list.append(r_fallback0)
         optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
         
@@ -209,8 +221,7 @@ class LlamaFinetuner:
             ### 한 에폭 당 데이터 개수/배치 사이즈만큼의 loss개수가 있을 것이다. 그래서 그 개수로 나눠 평균을 내는 것이다.
             self.val_loss_list.append(val_loss)
             self.train_loss_list.append(np.mean(train_loss)) 
-            print(f"Epoch {epoch+1}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}")
-
+            
             # [수정] Validation 평가 데이터 준비
             val_prompts = extract_prompts(val_jsonl, '') 
             val_truth = extract_completion(val_jsonl) 
@@ -218,18 +229,41 @@ class LlamaFinetuner:
             # 1. global_mean 설정 및 안전장치
             g_mean = fallback_means.get("global_mean") if fallback_means else None ###없으면 None으로 놓기.
             if g_mean is None:
-                print("Warning: global_mean not found in fallback_means. Using default 5.0")
                 g_mean = 5.0 # 수치적 안정성을 위해 0.0 대신 사용
             
             # 2. generate 호출
-            val_generated, invalid_ratio, final_invalid_ratio = self.generate(
+            # [수정] 로그 반환 요청 (return_logs=True)
+            val_generated, invalid_ratio, final_invalid_ratio, val_logs = self.generate(
                 text_lst=val_prompts, #####################이게 들어간다는 것
                 max_token=10, 
                 batch_size=batch_size, 
                 valid_mean=g_mean, 
-                fallback_means=fallback_means ##########################
+                fallback_means=fallback_means, ##########################
+                return_logs=True # [NEW] 상세 로그 받기
             )
             
+            # --- [추가됨] 로그 분석 및 비율 계산 ---
+            total_samples = len(val_generated)
+            
+            # 1. Greedy Success: attempt가 'greedy'이면서 is_valid가 True인 개수
+            n_greedy = sum(1 for log in val_logs if log['attempt'] == 'greedy' and log['is_valid'])
+            
+            # 2. Retry Success: attempt가 'retry'로 시작하면서 is_valid가 True인 개수
+            n_retry = sum(1 for log in val_logs if log['attempt'].startswith('retry') and log['is_valid'])
+            
+            # 3. Fallback Stat: attempt가 'fallback_stat'인 개수 (이건 무조건 valid 처리됨)
+            n_fallback = sum(1 for log in val_logs if log['attempt'] == 'fallback_stat')
+            
+            # 비율 계산
+            r_greedy = n_greedy / total_samples
+            r_retry = n_retry / total_samples
+            r_fallback = n_fallback / total_samples
+            
+            # 리스트에 저장
+            greedy_success_rate_list.append(r_greedy)
+            retry_success_rate_list.append(r_retry)
+            fallback_rate_list.append(r_fallback)
+
             # 문자열 -> 숫자 변환 및 RMSE 계산
             val_preds = np.array(val_generated) 
             val_truth_vals = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
@@ -238,8 +272,10 @@ class LlamaFinetuner:
             mse = np.mean((val_truth_vals - val_preds)**2) 
             val_rmse = np.sqrt(mse) 
             
-            print(f"Epoch {epoch+1} RMSE: {val_rmse:.4f}, Invalid Ratio: {invalid_ratio:.4f}")
-
+            print(f"Epoch {epoch+1}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}, RMSE: {val_rmse:.4f}")
+            # [제안] 바로 아랫줄에 상세 비율 출력 추가
+            print(f"   >> [Detail] Greedy: {r_greedy:.1%} | Retry: {r_retry:.1%} | Fallback: {r_fallback:.1%}")
+            
             val_rmse_list.append(val_rmse)
             misclassified.append(invalid_ratio) # 1차 실패율
             misclassified2.append(final_invalid_ratio) # Fallback 적용 후 실패율
@@ -249,11 +285,16 @@ class LlamaFinetuner:
             if improved:
                 best_loss = val_loss
                 es_counter = 0
-                print(f"[BEST] val_loss improved. Saving model...")
+                print(f"[BEST] val_loss improved. Saving model & logs...")
                 if saving_checkpoint:
                     self.save_model(epoch=epoch+1, val_metric=val_rmse, 
                                     val_loss=val_loss, invalid_ratio=invalid_ratio,
                                     final_invalid_ratio=final_invalid_ratio)
+                    
+                    # [NEW] Best Model의 예측 상세 기록 저장
+                    log_df = pd.DataFrame(val_logs)
+                    log_path = os.path.join(self.output_dir, "best_model_val_predictions.csv")
+                    log_df.to_csv(log_path, index=False, encoding='utf-8-sig')
             else:
                 es_counter += 1
                 if es_counter >= 5:
@@ -266,7 +307,10 @@ class LlamaFinetuner:
             'val_loss': self.val_loss_list,
             'val_rmse': val_rmse_list,
             'invalid_answer_ratio': misclassified,
-            'final_invalid_answer_ratio': misclassified2
+            'final_invalid_answer_ratio': misclassified2,
+            'greedy_success_rate': greedy_success_rate_list,
+            'retry_success_rate': retry_success_rate_list,
+            'fallback_rate': fallback_rate_list
         }
 
         with open(os.path.join(self.output_dir, "validation_metrics.json"), "w") as f:
@@ -308,8 +352,9 @@ class LlamaFinetuner:
 
     def generate(self, text_lst, max_token=10, batch_size=16,
                  valid_temperature=0.75, valid_mean=0.0, stop_str="@@@",
-                 retries=5, clip_min=0.0, clip_max=None, 
-                 fallback_means=None):
+                 retries=5, 
+                 clip_min=-5.0, clip_max=10.0, # [수정] Log Scale 고려 범위 조정
+                 fallback_means=None, return_logs=False): # [NEW] return_logs 추가
         
         self.model.eval()
         device = self.device
@@ -342,10 +387,12 @@ class LlamaFinetuner:
                 
                 # 한 문장씩 읽으면서 정답 decode하기(파싱)
                 for j, txt in enumerate(gen_texts): 
-                    results[i + j] = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
+                    val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
+                    # [수정] 결과 소수점 2자리 반올림 (parse 함수 내에서 이미 처리되지만 확실히)
+                    if val is not None: val = round(val, 2)
+                    results[i + j] = val
 
                     #### [추가 2] Greedy 결과 기록
-                    # 텍스트가 너무 길면 보기 힘드니 프롬프트는 뒷부분 50글자만 저장
                     prompt_short = texts[j][-50:] if len(texts[j]) > 50 else texts[j]
                     
                     all_debug_logs.append({
@@ -404,7 +451,9 @@ class LlamaFinetuner:
                     gen_texts = [self.tokenizer.decode(out_ids[b, T_in:], skip_special_tokens=True) for b in range(out_ids.size(0))]
                     for j, txt in enumerate(gen_texts):
                         val = parse_number_4dec(txt, stop_str=stop_str, clip_min=clip_min, clip_max=clip_max)
-                        if val is not None: results[idx_chunk[j]] = val
+                        if val is not None: 
+                            val = round(val, 2) # [수정] 2자리 반올림
+                            results[idx_chunk[j]] = val
                         
                         #### [수정됨] 정상 Sampling 시도 결과 기록 (여기 있어야 합니다!)
                         prompt_short = texts[j][-50:] if len(texts[j]) > 50 else texts[j]
@@ -486,6 +535,8 @@ class LlamaFinetuner:
                 except Exception as e:
                     print(f"[fallback lookup error idx={k}] {e}")
                 
+                # [수정] Fallback 값도 소수점 2자리 반올림
+                filled = round(filled, 2)
                 results[k] = float(filled)
 
                 ### [추가 4-옵션] Fallback으로 채워진 사실 기록 
@@ -501,24 +552,18 @@ class LlamaFinetuner:
         # 5. 최종 안전장치 및 반환 (Final Cleanup)
         # ---------------------------------------------------------
         # 혹시라도 여전히 None이거나 NaN이 남아있다면 무조건 valid_mean(여기서는 전체 평균)으로 채움
-        results = [float(valid_mean) if (v is None or v != v) else float(v) for v in results]
+        valid_mean_rounded = round(float(valid_mean), 2)
+        results = [valid_mean_rounded if (v is None or v != v) else float(v) for v in results]
         
         final_invalid_ratio = sum(1 for v in results if v is None) / len(text_lst) 
         
         #### [추가 5] CSV 파일로 저장
-        import pandas as pd
-        import os
-        
-        # 파일명 생성: debug_generations.csv
-        log_path = os.path.join(self.output_dir, "debug_generations.csv")
-        
-        # 데이터프레임 변환 및 저장
-        df_log = pd.DataFrame(all_debug_logs)
-        # 엑셀에서 한글/특수문자 안 깨지게 utf-8-sig 사용
-        df_log.to_csv(log_path, index=False, encoding='utf-8-sig') 
-        print(f"DEBUG LOG SAVED: {log_path}")
-        
-        return results, invalid_ratio, final_invalid_ratio
+        # [수정] return_logs 플래그에 따라 반환 값 조정
+        if return_logs:
+            return results, invalid_ratio, final_invalid_ratio, all_debug_logs
+        else:
+            # 기존 호환성 유지
+            return results, invalid_ratio, final_invalid_ratio
 
         
     # 업데이트 없이 순수하게 처음 세팅일 때 loss가 얼마인지 계산해서 baseline으로 섦정.
@@ -545,19 +590,34 @@ class LlamaFinetuner:
         if fallback_means is not None and "global_mean" in fallback_means:
             current_valid_mean = fallback_means["global_mean"]
 
-        val_generated, invalid_ratio, final_invalid_ratio = self.generate(
+        val_generated, invalid_ratio, final_invalid_ratio, val_logs = self.generate(
             text_lst=val_prompts, 
             max_token=10, 
             batch_size=batch_size, 
             valid_mean=current_valid_mean, 
-            fallback_means=fallback_means
+            fallback_means=fallback_means,
+            return_logs=True
         )
         
+        # [추가] 실제 비율 계산 로직 (train 루프와 동일)
+        total_samples = len(val_generated)
+        n_greedy = sum(1 for log in val_logs if log['attempt'] == 'greedy' and log['is_valid'])
+        n_retry = sum(1 for log in val_logs if log['attempt'].startswith('retry') and log['is_valid'])
+        n_fallback = sum(1 for log in val_logs if log['attempt'] == 'fallback_stat')
+        
+        r_greedy = n_greedy / total_samples
+        r_retry = n_retry / total_samples
+        r_fallback = n_fallback / total_samples
+
         val_preds = np.array(val_generated)
         val_truth_vals = np.array([float(s.split('@@@', 1)[0].strip()) for s in val_truth])
         val_rmse = np.sqrt(np.mean((val_truth_vals - val_preds)**2))
+
+        print(f"Epoch 0: Train Loss: {np.mean(tr_loss):.4f}, Val Loss: {val_loss:.4f}, RMSE: {val_rmse:.4f}")
+        print(f"   >> [Epoch 0 Detail] Greedy: {r_greedy:.1%} | Retry: {r_retry:.1%} | Fallback: {r_fallback:.1%}")
         
-        return np.mean(tr_loss), val_loss, val_rmse, 0.0, invalid_ratio, final_invalid_ratio
+        # [수정] 계산된 비율 3가지를 반환 값에 포함시킵니다.
+        return np.mean(tr_loss), val_loss, val_rmse, r_greedy, r_retry, r_fallback, invalid_ratio, final_invalid_ratio
 
     def save_model(self, epoch=None, val_metric=None, val_loss=None, invalid_ratio=None, final_invalid_ratio=None):
         os.makedirs(self.output_dir, exist_ok=True)

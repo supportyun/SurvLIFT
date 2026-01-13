@@ -1,0 +1,35 @@
+Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
+2026-01-14 02:59:24.152060: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2026-01-14 02:59:24.152139: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2026-01-14 02:59:24.154027: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2026-01-14 02:59:24.162712: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 AVX_VNNI AMX_TILE AMX_INT8 AMX_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Prepare data (Seed: 1)...
+Loading data from: /home/kanggi1/SurvLIFT/data/target_data_for_aft_seed1.csv
+Save prompts...
+Building group means for fallback...
+Train Global Mean: 1.66
+Start train...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/kanggi1/SurvLIFT/regression/main_logit_cp_share.py", line 263, in <module>
+    main(args) ### args는 설정값들의 모음
+  File "/home/kanggi1/SurvLIFT/regression/main_logit_cp_share.py", line 120, in main
+    finetuner = LlamaFinetuner(
+  File "/home/kanggi1/SurvLIFT/regression/llama_finetuner_logit_cp_share.py", line 141, in __init__
+    self.model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=bnb_config)
+  File "/home/kanggi1/miniconda3/envs/survlift_final/lib/python3.10/site-packages/transformers/models/auto/auto_factory.py", line 604, in from_pretrained
+    return model_class.from_pretrained(
+  File "/home/kanggi1/miniconda3/envs/survlift_final/lib/python3.10/site-packages/transformers/modeling_utils.py", line 277, in _wrapper
+    return func(*args, **kwargs)
+  File "/home/kanggi1/miniconda3/envs/survlift_final/lib/python3.10/site-packages/transformers/modeling_utils.py", line 5048, in from_pretrained
+    ) = cls._load_pretrained_model(
+  File "/home/kanggi1/miniconda3/envs/survlift_final/lib/python3.10/site-packages/transformers/modeling_utils.py", line 5468, in _load_pretrained_model
+    _error_msgs, disk_offload_index = load_shard_file(args)
+  File "/home/kanggi1/miniconda3/envs/survlift_final/lib/python3.10/site-packages/transformers/modeling_utils.py", line 843, in load_shard_file
+    disk_offload_index = _load_state_dict_into_meta_model(
+  File "/home/kanggi1/.local/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/kanggi1/miniconda3/envs/survlift_final/lib/python3.10/site-packages/transformers/modeling_utils.py", line 750, in _load_state_dict_into_meta_model
+    param = param.to(casting_dtype)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1002.00 MiB. GPU 0 has a total capacity of 31.61 GiB of which 199.44 MiB is free. Process 2707935 has 30.12 GiB memory in use. Including non-PyTorch memory, this process has 1.28 GiB memory in use. Of the allocated memory 1002.00 MiB is allocated by PyTorch, and 0 bytes is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

@@ -1,59 +1,53 @@
 #!/bin/bash
-set -e  # Stop script immediately on error
-export CUDA_VISIBLE_DEVICES=1
+set -e
+export CUDA_VISIBLE_DEVICES=0
 
-# Move to the script's directory
 cd "$(dirname "$0")"
 
 # ==========================================
-# 🔑 Token Settings
+# 🔐 Token (터미널에서 export 후 실행 권장)
 # ==========================================
 
 
 # ==========================================
-# 🎛️ Experiment Settings (Grid Search)
+# ⚔️ The Final Battle: Rank 16 vs Rank 32
 # ==========================================
-SEEDS=(1 2)                 
-RANKS=(16 32)               
-LRS=("1e-4" "5e-5")         
+SEEDS=(1 2 3 4 5)       # 통계적 유의성을 위해 5개
+RANKS=(16 32)           # 2순위와 1순위 모델 둘 다 비교
+LRS=("5e-5")            # LR은 이게 베스트였음 (고정)
 # ==========================================
 
-echo "🚀 Starting Grid Search: Total 8 Experiments"
-echo "---------------------------------------------"
+echo "🚀 Starting Final Validation: Total $(( ${#SEEDS[@]} * ${#RANKS[@]} )) Experiments"
 
-# Counter for progress tracking
 count=0
-total=8
+total=$(( ${#SEEDS[@]} * ${#RANKS[@]} ))
 
 for seed in "${SEEDS[@]}"; do
     for r in "${RANKS[@]}"; do
         for lr in "${LRS[@]}"; do
             
-            # Increment counter
             count=$((count + 1))
 
             # --- [Auto-Parameter Logic] ---
+            # Rank에 따라 Alpha와 Dropout을 자동으로 조절
             alpha=$((r * 2))
             
             if [ "$r" -eq 32 ]; then
-                dropout=0.1
+                dropout=0.1   # Rank 32일 때 최적
             else
-                dropout=0.05
+                dropout=0.05  # Rank 16일 때 최적
             fi
             # ----------------------------------
 
-            log_file="logs/training_s${seed}_r${r}_lr${lr}.out"
+            log_file="logs/final_s${seed}_r${r}_lr${lr}.out"
             mkdir -p logs
 
             echo ""
             echo "=========================================================="
-            echo "▶️  [Progress: $count / $total] Starting Experiment..."
-            echo "   • Settings: Seed=$seed | Rank=$r | Alpha=$alpha | Drop=$dropout | LR=$lr"
-            echo "   • Log File: $log_file"
+            echo "▶️  [Progress: $count / $total] Running Experiment..."
+            echo "   • Seed: $seed | Rank: $r | Alpha: $alpha | LR: $lr"
             echo "=========================================================="
 
-            # ✅ KEY CHANGE: Using 'tee' to show output AND save to file
-            # PYTHONUNBUFFERED=1 prevents print delay
             export PYTHONUNBUFFERED=1
             
             python main_logit_cp_share.py \
@@ -76,14 +70,10 @@ for seed in "${SEEDS[@]}"; do
               --interp_method "linear" \
               --min_g 1e-10 \
               2>&1 | tee "$log_file"
-
-            echo ""
-            echo "✅ [Experiment Done] ($count / $total) Finished!"
-            echo "---------------------------------------------"
             
             sleep 5
         done
     done
 done
 
-echo "🎉 All Grid Search Experiments Finished!"
+echo "🎉 All Experiments Finished!"

@@ -1,0 +1,5 @@
+param,covariate,coefficient
+lambda_,age,-0.01117070915743929
+lambda_,trt,0.10043890333516137
+lambda_,Intercept,2.5735454080282123
+rho_,Intercept,0.38286783723866413
