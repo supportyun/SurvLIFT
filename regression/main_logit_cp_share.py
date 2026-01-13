@@ -4,17 +4,36 @@ import argparse
 import torch
 import pandas as pd
 import numpy as np
-from huggingface_hub import login  # [추가]
-login(token="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")
+from huggingface_hub import login
+import os
+login(token=os.getenv("HF_TOKEN"))
 from llama_finetuner_logit_cp_share import LlamaFinetuner
 from sklearn.model_selection import train_test_split
-from data_utils_share import *
+from data_utils_share import * ####전부 import하는 것
 from transformers import set_seed
+from datetime import datetime  # 
 
 def prepare_data(data_seed):
-    # 상대 경로로 타겟 데이터 로드
-    file_path = f"../data/target_data_for_aft_seed{data_seed}.csv"
+    # [수정 후] 현재 파일 위치를 기준으로 한 '절대 경로' 사용 (가장 안전함)
+    # 1. 현재 이 스크립트(main_logit...py)가 있는 폴더 경로 (regression 폴더)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 2. 그 상위 폴더 (SurvLIFT 프로젝트 루트)
+    project_root = os.path.dirname(script_dir)
+    
+    # 3. 데이터 파일 경로 결합 (SurvLIFT/data/target_data_for_aft_seed1.csv)
+    file_path = os.path.join(project_root, "data", f"target_data_for_aft_seed{data_seed}.csv")
+    
+    print(f"Loading data from: {file_path}") # 경로 확인용 로그 출력
+
     if not os.path.exists(file_path):
+        # 파일이 진짜 없는 경우를 대비해 현재 data 폴더에 뭐가 있는지 보여줌
+        data_dir = os.path.dirname(file_path)
+        if os.path.exists(data_dir):
+            print(f"Files in data dir: {os.listdir(data_dir)}")
+        else:
+            print(f"Data directory does not exist: {data_dir}")
+            
         raise FileNotFoundError(f"Data file not found: {file_path}")
         
     df = pd.read_csv(file_path)
@@ -22,7 +41,7 @@ def prepare_data(data_seed):
     # Train/Val/Test Split (기존 로직 유지)
     event_data = df[df['status'] == 1]
     censor_data = df[df['status'] == 0]
-
+    # train:validation:test = 8:1:1로 만드는 과정.
     event_train, event_temp = train_test_split(event_data, test_size=0.2, random_state=42)
     event_validate, event_test = train_test_split(event_temp, test_size=0.5, random_state=42)
     censor_train, censor_temp = train_test_split(censor_data, test_size=0.2, random_state=42)
@@ -35,10 +54,10 @@ def prepare_data(data_seed):
     return train, validate, test
 
 ### 프롬프트 변환, 변환후 jsonl 파일로 저장
-# args 는 터미널에 입력한 값들을 객체 형태로 저장, 실험 설정값들의 모음집이라고 보면 됨.
+# args 는 터미널에 입력한 값들을 객체 형태로 저장, 실험 설정값들의 모음집이라고 보면 됨. 예) arg.epochs
 def main(args):
     print(f"Prepare data (Seed: {args.data_seed})...")
-    set_seed(args.seed)
+    set_seed(args.seed) ##huggingface transformer 라이브러리 함수
     
     # 1. 데이터 로드
     train, validate, test = prepare_data(args.data_seed)
@@ -53,38 +72,60 @@ def main(args):
     train_prompts = df2prompts(train, data2text_cp2, init, end)
     val_prompts = df2prompts(validate, data2text_cp2, init, end)
     test_prompts = df2prompts(test, data2text_cp2, init, end)
-
+    #
     print("Save prompts...")
+
+    # 1. [필수] 오늘 날짜와 기본 경로(base_dir)를 먼저 정의해야 합니다!
+    today_date = datetime.now().strftime("%y%m%d")
+    
     base_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 
-        f"results/250923/data{args.data_seed}/seed_{args.seed}"
-    )    
-    output_dir = os.path.join(base_dir, f"epochs_{args.epochs}_lr_{args.lr}")
+        f"results/{today_date}/data{args.data_seed}/seed_{args.seed}"
+    )
+    # [수정 후] 실험 세팅(Rank, Alpha, LR, Dropout)이 모두 폴더명에 들어가도록 변경
+    folder_name = (
+        f"epochs_{args.epochs}_"
+        f"rank{args.r}_"       # args.r 확인 (parser에 정의된 이름)
+        f"alpha{args.lora_alpha}_"
+        f"lr{args.lr}_"
+        f"drop{args.lora_dropout}"
+    )
+    
+    output_dir = os.path.join(base_dir, folder_name)
     os.makedirs(output_dir, exist_ok=True)
 
     train_js_path = os.path.join(output_dir, "synthetic_prompts_train.jsonl")
     val_js_path   = os.path.join(output_dir, "synthetic_prompts_val.jsonl")
     test_js_path  = os.path.join(output_dir, "synthetic_prompts_test.jsonl")
 
+    #딕셔너리가 리스트 안에 배열되어 있는데 이거를 \n을 기준으로 jsonl으로 합침
     write_jsonl('\n'.join(train_prompts), train_js_path)
     write_jsonl('\n'.join(val_prompts), val_js_path)
     write_jsonl('\n'.join(test_prompts), test_js_path)
-    #fallback_means 처리 (None)
-    # 원본: build_group_means(...) 함수로 그룹별 평균 Hazard를 미리 계산해 뒀습니다. (모델이 답을 못 낼 경우 대타로 쓰기 위해)
-    # Fallback means는 필요 시 구현 (여기서는 생략 가능하거나 train 데이터 기반으로 계산)
-    fallback_means = None 
     
-    print('Start train...')
+    # [수정 후] 
+    # 1. Train 데이터를 사용해 그룹별 평균(족보) 생성
+    # (주의: make_target.py를 통해 만들어진 csv에는 'target_time' 컬럼이 있어야 합니다)
+    print("Building group means for fallback...")
+    
+    # data_utils_share.py에 추가한 build_time_group_means 함수 사용
+    group_means_dict = build_time_group_means(train, target_col="target_time")
+    
+    # 2. 전체 평균도 미리 계산 (Global Mean) - 최후의 보루
+    train_mean = train['target_time'].mean()
+    print(f"Train Global Mean: {train_mean:.4f}") 
+    
+    print('Start train...')                 ##클래스 불러서 객체 만들기
     finetuner = LlamaFinetuner(
         model_name=args.model_name,
         device=args.device,
         output_dir=output_dir,
-        load_in_4bit=args.load_in_4bit,
-        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
-        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype,
-        bnb_4bit_quant_type=args.bnb_4bit_quant_type,
-        r=args.r,
-        lora_alpha=args.lora_alpha,
+        load_in_4bit=args.load_in_4bit, #4비트로 압축해서 GPU메모리 아끼기
+        bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant, #이중 양자화
+        bnb_4bit_compute_dtype=args.bnb_4bit_compute_dtype, #비트
+        bnb_4bit_quant_type=args.bnb_4bit_quant_type, #압축 방식
+        r=args.r, #LoRA를 사용하는데, rank를 의미
+        lora_alpha=args.lora_alpha, # Scaling Factor(학습 반영 비율)
         lora_dropout=args.lora_dropout,
         seed = args.seed
     )
@@ -94,18 +135,20 @@ def main(args):
                     epochs=args.epochs,
                     batch_size=args.batch_size,
                     lr=args.lr,
-                    weight_decay=args.weight_decay,
+                    weight_decay=args.weight_decay, #overfitting 방지
                     warmup_steps=args.warmup_steps,
                     saving_checkpoint=args.saving_checkpoint,
                     unique_validate_df = None,  # 시간 예측에서는 불필요
                     interp_method = args.interp_method,
                     min_g = args.min_g,
-                    fallback_means = fallback_means
+                    fallback_means = group_means_dict
                     )
-    
+    ####Validation 관련 내용은 llama finetuner 파일에 있음.
     # --- 평가 (Evaluate) ---
     print("Start evaluate...")
-    finetuner.load_model()
+    # finetuner.load_model()
+    # [수정 후] 더 강력하고 안전한 로딩 함수 사용
+    finetuner.load_model2()
     
     test_prompts_loaded = extract_prompts(test_js_path, '')
     test_completions = extract_completion(test_js_path)
@@ -114,11 +157,20 @@ def main(args):
     test_truth = [float(s.split('@@@', 1)[0].strip()) for s in test_completions]
     
     # 예측
-    ans, invalid_ratio, final_invalid_ratio = finetuner.generate(
+    # ans, invalid_ratio, final_invalid_ratio
+    #  = finetuner.generate(text_lst=test_prompts, max_token=10,
+    #  batch_size=args.batch_size, valid_mean = 0.0) -> hazard 0 대신에 그냥 평균 수명으로...
+    # [수정 후]
+    ans, invalid_ratio, final_invalid_ratio = finetuner.generate( ####이 부분에서
         text_lst=test_prompts_loaded, 
         max_token=10, 
         batch_size=args.batch_size, 
-        valid_mean=np.mean(test_truth)
+        
+        # 1. 최후의 보루: Train 데이터의 전체 평균 사용 
+        valid_mean=train_mean, 
+        
+        # 2. 1차 방어막: Train 데이터로 만든 그룹별 평균 족보 사용
+        fallback_means=group_means_dict
     )
 
     print("Predictions sample:", ans[:5])
@@ -158,7 +210,7 @@ def main(args):
     metrics = {
         "test_rmse": rmse,
         "invalid_answer_ratio": invalid_ratio,
-        "final_invalid_answer_ratio": final_invalid_ratio
+        "final_invalid_answer_ratio": final_invalid_ratio   ####invalid ratio의 차이
     }
     
     # test_metrics.json 파일로 저장
@@ -194,4 +246,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.device = torch.device(args.device)
     
-    main(args)
+    main(args) ### args는 설정값들의 모음

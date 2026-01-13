@@ -12,9 +12,15 @@ def process_seed(seed):
     input_filename = f"synthetic_pbc_data_N300_given_2_covariate_seed{seed}.csv"
     output_filename = f"target_data_for_aft_seed{seed}.csv"
     
-    # regression 폴더에서 실행한다고 가정하에 상위 폴더의 data 폴더 접근
-    input_path = os.path.join("../data", input_filename)
-    output_path = os.path.join("../data", output_filename)
+    # [수정] 스크립트 파일의 위치를 기준으로 경로를 계산합니다.
+    # 1. 현재 파일(make_target.py)이 있는 폴더 (SurvLIFT/regression)
+    current_script_dir = os.path.dirname(os.path.abspath(__file__))
+    # 2. 상위 폴더 (SurvLIFT)
+    project_root = os.path.dirname(current_script_dir)
+    
+    # 3. 데이터 폴더와 결합 (SurvLIFT/data)
+    input_path = os.path.join(project_root, "data", input_filename)
+    output_path = os.path.join(project_root, "data", output_filename)
     
     # 파일 존재 여부 확인
     if not os.path.exists(input_path):
