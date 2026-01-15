@@ -1,0 +1,7 @@
+{
+  "epoch": 3,
+  "val_loss": 1.3415377289056778,
+  "val_rmse": 4.034102130586185,
+  "invalid_ratio": 0.0,
+  "final_invalid_ratio": 0.0
+}
