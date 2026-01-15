@@ -173,9 +173,9 @@ def main(args):
         # 2. 1차 방어막: Train 데이터로 만든 그룹별 평균 족보 사용
         fallback_means=group_means_dict,
         
-        # [수정] Log Scale 고려한 범위 설정 (Clip)
+        # [수정] Linear Scale 고려한 범위 설정 (Clip)
         clip_min=0.0,
-        clip_max=None,
+        clip_max=120.0,
         
         # [NEW] Test 상세 로그 받기
         return_logs=True

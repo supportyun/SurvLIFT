@@ -151,7 +151,7 @@ def parse_number_4dec(text: str,
                       stop_str: str = "@@@",
                       which: str = "last",       
                       clip_min: Optional[float] = 0.0,    # [수정] 시간은 음수 불가
-                      clip_max: Optional[float] = None): 
+                      clip_max: Optional[float] = 120.0): # [수정] 사람 기대수명 상한(년 단위 가정)
     # 1. stop_str(@@@)이 있으면 그 뒤는 과감히 자릅니다.
     # 예: "21.5@@@Compute..." -> "21.5"
     if stop_str and stop_str in text:
