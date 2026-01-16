@@ -11,11 +11,14 @@ from typing import Optional
 from lifelines import KaplanMeierFitter
 
 #(data2text_func함수를 행별로 적용해서 jsonl 형식으로 뱉어준다)
-def df2prompts(df, data2text_func, init='', end=''):
-    jsonl = df.apply(func=partial(data2text_func, init=init, end=end), axis=1).tolist()
+def df2prompts(df, data2text_func, init='', end='', target_scale='log'):
+    jsonl = df.apply(
+        func=partial(data2text_func, init=init, end=end, target_scale=target_scale),
+        axis=1,
+    ).tolist()
     return jsonl
 #partial 함수를 써서 미리 init, end를 지정한채 실행, axis=1로 한 행씩 appy함수를 적용한다
-def data2text_cp2(row, label=True, init='', end=''): 
+def data2text_cp2(row, label=True, init='', end='', target_scale='log'): 
     ###label=True라는 것은 학습 모드라는 것, 나중에 main_logit_cp_share에서 test, train data를 만들 때 사용됨.
     prompt = init
     # status = row['status']
@@ -31,7 +34,9 @@ def data2text_cp2(row, label=True, init='', end=''):
         f"At enrollment, the patient was {row['age']:.2f} years old, and "
         f"{'was treated with D-penicillamine' if row['trt'] == 1 else 'received placebo'}. "
         # [중요]질문을 '생존 시간 예측'으로 변경
-        f"Based on these features, predict the natural log of the expected survival time (log(T)) for this patient. "
+        f"Based on these features, predict the "
+        f"{'natural log of the expected survival time (log(T))' if target_scale == 'log' else 'expected survival time (T)'} "
+        f"for this patient. "
         f"Output only one non-negative real number. No extra text."
     )
 

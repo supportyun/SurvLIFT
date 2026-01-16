@@ -1,16 +1,18 @@
 ## KaplanMeierFitter: 나중에 잔차의 분포를 비모수적으로 추정하기 위해 사용.
-import pandas as pd
-import numpy as np
-from lifelines import WeibullAFTFitter, KaplanMeierFitter
+import argparse
 import os
 
-def process_seed(seed):
+import numpy as np
+import pandas as pd
+from lifelines import KaplanMeierFitter, WeibullAFTFitter
+
+def process_seed(seed, target_scale):
     """
     특정 Seed의 데이터 파일을 읽어서 AFT 기반 타겟 데이터를 생성하고 저장하는 함수
     """
     # 1. 파일 경로 설정 (상대 경로 사용)
     input_filename = f"synthetic_pbc_data_N300_given_2_covariate_seed{seed}.csv"
-    output_filename = f"target_data_for_aft_seed{seed}.csv"
+    output_filename = f"target_data_for_aft_seed{seed}_{target_scale}.csv"
     beta_filename = f"beta_coefficients_seed{seed}.csv" # [수정] 베타값 저장 파일명 추가
     
     # [수정] 스크립트 파일의 위치를 기준으로 경로를 계산합니다.
@@ -106,12 +108,13 @@ def process_seed(seed):
         new_targets_log.append(target)
 
     # 7. 결과 저장
-    # 모델 학습용 (로그 스케일)
     # [수정] 소수 둘째자리까지 반올림 (LLM 입력 부담 완화)
-    df['target_log_time'] = np.round(new_targets_log, 2) 
-    
-    # [수정] data_utils에서 'target_time' 컬럼을 찾으므로, Log Scale 값을 여기에 넣어줍니다.
-    df['target_time'] = df['target_log_time']
+    df['target_log_time'] = np.round(new_targets_log, 2)
+
+    if target_scale == "linear":
+        df['target_time'] = np.round(np.exp(df['target_log_time']), 2)
+    else:
+        df['target_time'] = df['target_log_time']
     
     df['age'] = np.round(df['age'], 2) ## 소수 둘째자리까지 표현
     
@@ -124,9 +127,18 @@ def process_seed(seed):
 
 def main():
     print("=== 전체 Seed 데이터에 대한 Target 생성 및 Beta 저장 시작 ===")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--target-scale",
+        type=str,
+        default="log",
+        choices=["log", "linear"],
+        help="Target scale for target_time: log(T) or T.",
+    )
+    args = parser.parse_args()
     # Seed 1부터 10까지 반복
     for seed in range(1, 11):
-        process_seed(seed)
+        process_seed(seed, args.target_scale)
     print("=== 모든 작업 완료 ===")
 
 if __name__ == "__main__":

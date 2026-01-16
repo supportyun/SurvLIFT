@@ -15,6 +15,8 @@ cd "$(dirname "$0")"
 SEEDS=(1 2 3 4 5)       # 통계적 유의성을 위해 5개
 RANKS=(16 32)           # 2순위와 1순위 모델 둘 다 비교
 LRS=("5e-5")            # LR은 이게 베스트였음 (고정)
+TARGET_SCALE="linear"   # "linear" or "log"
+EXPERIMENT_DATE=$(date +"%y%m%d") # YYMMDD, fixed at script start
 # ==========================================
 
 echo "🚀 Starting Final Validation: Total $(( ${#SEEDS[@]} * ${#RANKS[@]} )) Experiments"
@@ -45,7 +47,7 @@ for seed in "${SEEDS[@]}"; do
             echo ""
             echo "=========================================================="
             echo "▶️  [Progress: $count / $total] Running Experiment..."
-            echo "   • Seed: $seed | Rank: $r | Alpha: $alpha | LR: $lr"
+            echo "   • Seed: $seed | Rank: $r | Alpha: $alpha | LR: $lr | Scale: $TARGET_SCALE"
             echo "=========================================================="
 
             export PYTHONUNBUFFERED=1
@@ -69,6 +71,8 @@ for seed in "${SEEDS[@]}"; do
               --saving_checkpoint 1 \
               --interp_method "linear" \
               --min_g 1e-10 \
+              --target_scale $TARGET_SCALE \
+              --experiment_date $EXPERIMENT_DATE \
               2>&1 | tee "$log_file"
             
             sleep 5
